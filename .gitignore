@@ -22,3 +22,6 @@ desktop.ini
 
 # Logs
 *.log
+
+# Local planning notes — not committed to the public repo
+planning/

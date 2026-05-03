@@ -11,6 +11,9 @@
 #include <AsyncWebSocket.h>
 #include "can_bridge.h"
 #include "can_config.h"
+#include "dbc_parser.h"
+#include "tx_scheduler.h"
+#include "marker_plan.h"
 
 /**
  * @brief Web server for the CAN Bridge Analyzer interface.
@@ -41,10 +44,13 @@ private:
     CANBridge* can_bridge;
     AsyncWebServer server;
     AsyncWebSocket ws;
+    DBCParser dbc_parser;
 
     uint32_t client_count;
     unsigned long last_update;
     unsigned long last_stats_print;
+    bool spiffs_mounted = false;
+    bool reload_dbc_pending = false;
 
     void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
                          AwsEventType type, void *arg, uint8_t *data, size_t len);
@@ -56,9 +62,19 @@ private:
     const char* generateCSS();
     const char* generateJavaScript();
     String generateConfigPage();
+    String generateDBCPage();
+    String generateTxPage();
+    String generateMarkersPage();
 
     String get_can_ids_summary();
     String get_selected_payload_detail(uint32_t can_id);
+    String get_dbc_file_list_json();
+    static String sanitize_dbc_filename(const String& raw);
+
+    void reload_dbc_parser();
+    static bool   is_in_dbc_list(const char* list, const char* fname);
+    static void   add_to_dbc_list(char* list, size_t list_size, const char* fname);
+    static void   remove_from_dbc_list(char* list, const char* fname);
 };
 
 #endif // WEB_SERVER_H

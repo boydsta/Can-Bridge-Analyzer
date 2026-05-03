@@ -1,0 +1,65 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: VCU Dash
+
+/* ============================================================
+ *  SPUD Dash ↔ VCU private CAN bus
+ *  All frames 8 bytes, Intel (little-endian) byte order.
+ *  Signal bit positions are LSB for @1 (Intel) signals.
+ *  Source: can_ids.h in the Can-Bridge-Analyzer project.
+ * ============================================================ */
+
+BO_ 1562 DASH_STATUS: 8 Dash
+ SG_ StatusByte        : 4|4@1+  (1,0)      [0|15]     ""    VCU
+ SG_ BModeRequested    : 12|1@1+ (1,0)      [0|1]      ""    VCU
+ SG_ CruiseConRequest  : 10|1@1+ (1,0)      [0|1]      ""    VCU
+ SG_ MaxCharge         : 16|8@1+ (1,0)      [0|100]    "%"   VCU
+
+BO_ 1578 VCU_DASHMESG1: 8 VCU
+ SG_ HV_Voltage        : 0|11@1+  (0.1,0)      [0|200]     "V"   Dash
+ SG_ HV_Current        : 11|11@1+ (0.1,-102.4)  [-100|100]  "A"   Dash
+ SG_ MotorRPM          : 22|12@1+ (10,-10240)   [-8000|30000] "RPM" Dash
+ SG_ Throttle          : 34|8@1+  (1,0)         [0|100]     "%"   Dash
+ SG_ Speed             : 42|12@1+ (0.1,0)       [0|400]     "KPH" Dash
+ SG_ VCU_State         : 54|4@1+  (1,0)         [0|15]      ""    Dash
+ SG_ Brake             : 63|1@1+  (1,0)         [0|1]       ""    Dash
+
+BO_ 1579 VCU_DASHMESG2: 8 VCU
+ SG_ MC_Relay          : 7|1@1+  (1,0)   [0|1]    ""    Dash
+ SG_ RunSwitch         : 6|1@1+  (1,0)   [0|1]    ""    Dash
+ SG_ NegRelay          : 5|1@1+  (1,0)   [0|1]    ""    Dash
+ SG_ PosRelay          : 3|1@1+  (1,0)   [0|1]    ""    Dash
+ SG_ EVSE_Plugged      : 2|1@1+  (1,0)   [0|1]    ""    Dash
+ SG_ EVSE_On           : 1|1@1+  (1,0)   [0|1]    ""    Dash
+ SG_ Gear              : 13|3@1+ (1,0)   [0|7]    ""    Dash
+ SG_ BMode             : 12|1@1+ (1,0)   [0|1]    ""    Dash
+ SG_ LimpMode          : 11|1@1+ (1,0)   [0|1]    ""    Dash
+ SG_ CruiseActive      : 10|1@1+ (1,0)   [0|1]    ""    Dash
+ SG_ LV_Voltage        : 16|8@1+ (0.1,0) [0|25.5] "V"   Dash
+ SG_ SoC               : 24|10@1+ (0.1,0) [0|100] "%"   Dash
+ SG_ ChargeRate        : 34|11@1+ (0.5,0) [0|512] "A"   Dash
+ SG_ BrakeVacuum       : 40|8@1+ (1,0)   [0|255]  ""    Dash
+ SG_ GearSwitchVoltage : 48|8@1+ (1,0)   [0|255]  ""    Dash
+
+BO_ 1580 VCU_DASHMESG3: 8 VCU
+ SG_ Odometer          : 0|24@1+ (0.1,0)   [0|1677721] "km"   Dash
+ SG_ InverterTemp      : 24|8@1+ (1,0)     [0|255]     "degC" Dash
+ SG_ MotorTemp         : 32|8@1+ (1,0)     [0|255]     "degC" Dash
+ SG_ BattTempMin       : 40|8@1+ (1,-50)   [-50|205]   "degC" Dash
+ SG_ BattTempMax       : 48|8@1+ (1,-50)   [-50|205]   "degC" Dash
+
+BO_ 1581 VCU_DASHMESG4: 8 VCU
+ SG_ MinCellVoltage    : 0|13@1+  (1,0)  [0|8191]   "mV" Dash
+ SG_ MaxCellVoltage    : 13|13@1+ (1,0)  [0|8191]   "mV" Dash
+ SG_ EnergyRemaining   : 32|14@1+ (80,0) [0|1310640] "Wh" Dash
+ SG_ TotalCapacity     : 46|13@1+ (80,0) [0|655280]  "Wh" Dash
+
+BO_ 1594 DTC_BROADCAST: 8 VCU
+ SG_ LampStatus        : 0|8@1+  (1,0)    [0|255]   ""  Dash
+ SG_ DTC_Type          : 8|8@1+  (1,0)    [0|255]   ""  Dash
+ SG_ DTC_Code          : 16|16@1+ (1,-256) [-256|65279] "" Dash
+

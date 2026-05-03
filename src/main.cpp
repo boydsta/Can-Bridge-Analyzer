@@ -18,6 +18,7 @@
 #include "can_bridge.h"
 #include "web_server.h"
 #include "can_config.h"
+#include "tx_scheduler.h"
 
 #define ARB_BIT_RATE 500000  // fallback for can_init default arg only
 
@@ -682,6 +683,11 @@ void setup() {
     if (g_serial_logging && g_serial_mode == 0) { Serial.println("Warning: No CAN controllers enabled in runtime config"); }
     can_bridge = nullptr;
   }
+
+  /* Start generic periodic transmit scheduler.  CAN controllers may be
+     nullptr if they failed init — scheduler handles that gracefully. */
+  g_tx_sched.begin(can0_success ? &can0 : nullptr,
+                   can1_success ? &can1 : nullptr);
 
   if (g_serial_logging && g_serial_mode == 0) { Serial.println("Starting WiFi Access Point..."); }
 

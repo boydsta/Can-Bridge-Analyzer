@@ -45,14 +45,15 @@ static const uint8_t k_default_preset = 2;  // 500 kbps CAN 2.0
 // CANConfig — all configurable settings persisted in NVS namespace "can_cfg"
 // ---------------------------------------------------------------------------
 struct CANConfig {
-  bool     can0_enable;   ///< Enable CAN0 controller
-  bool     can1_enable;   ///< Enable CAN1 controller
-  bool     can0_print;    ///< Print CAN0 frames to USB serial
-  bool     can1_print;    ///< Print CAN1 frames to USB serial
-  uint8_t  bus_preset;    ///< Index into k_bus_presets[] — encodes speed + frame type
-  uint8_t  serial_mode;   ///< 0=Diagnostics  1=SavvyCAN CSV  2=Binary GVRET
-  char     wifi_ssid[33]; ///< WiFi AP SSID (max 32 chars)
-  char     wifi_pass[64]; ///< WiFi AP password; empty = open network
+  bool     can0_enable;     ///< Enable CAN0 controller
+  bool     can1_enable;     ///< Enable CAN1 controller
+  bool     can0_print;      ///< Print CAN0 frames to USB serial
+  bool     can1_print;      ///< Print CAN1 frames to USB serial
+  uint8_t  bus_preset;      ///< Index into k_bus_presets[] — encodes speed + frame type
+  uint8_t  serial_mode;     ///< 0=Diagnostics  1=SavvyCAN CSV  2=Binary GVRET
+  char     wifi_ssid[33];   ///< WiFi AP SSID (max 32 chars)
+  char     wifi_pass[64];   ///< WiFi AP password; empty = open network
+  char     active_dbcs[128]; ///< Comma-separated list of active DBC files (e.g. "leaf.dbc,tesla.dbc"); empty = none
 };
 
 /** @brief Load CANConfig from NVS, applying sensible defaults. */
@@ -73,6 +74,9 @@ inline CANConfig load_can_config() {
   String wp = prefs.getString("wifi_pass", "canbus123");
   strncpy(cfg.wifi_pass, wp.c_str(), sizeof(cfg.wifi_pass) - 1);
   cfg.wifi_pass[sizeof(cfg.wifi_pass) - 1] = '\0';
+  String dbc = prefs.getString("active_dbcs", "");
+  strncpy(cfg.active_dbcs, dbc.c_str(), sizeof(cfg.active_dbcs) - 1);
+  cfg.active_dbcs[sizeof(cfg.active_dbcs) - 1] = '\0';
   prefs.end();
   return cfg;
 }
@@ -89,6 +93,7 @@ inline void save_can_config(const CANConfig& cfg) {
   prefs.putUChar("ser_mode", cfg.serial_mode);
   prefs.putString("wifi_ssid", cfg.wifi_ssid);
   prefs.putString("wifi_pass", cfg.wifi_pass);
+  prefs.putString("active_dbcs", cfg.active_dbcs);
   prefs.end();
 }
 

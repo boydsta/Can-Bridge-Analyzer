@@ -1,5 +1,7 @@
 # CAN Bridge Analyzer
 
+**v0.2.0** · [Changelog](CHANGELOG.md)
+
 A dual-bus CAN 2.0 / CAN FD capture, analysis, and bridging tool for the **SPUD** DIY controller board by [Ripple Tech](https://shop.rippletech.co.nz).
 
 Flash it once and configure everything over WiFi — no re-flashing required to change bus speed, mode, or SSID.

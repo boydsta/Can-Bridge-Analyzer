@@ -2,6 +2,7 @@
 #include "can_analysis.h"
 #include <Preferences.h>
 #include "can_config.h"
+#include <SPIFFS.h>
 
 /* [NEW] Full runtime config — set by setup() from NVS, read here for /api/get_config. */
 extern CANConfig g_cfg;
@@ -47,19 +48,25 @@ void CANWebServer::begin(const char* ssid, const char* password) {
       Serial.printf("IP Address: %s\n", WiFi.softAPIP().toString().c_str());
     }
 
-    // Serve main page
+    // Serve main page — served directly from flash (static const) to avoid large heap copy
     server.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        request->send(200, "text/html", generateMainPage());
+        const char* pg = generateMainPage();
+        request->send(request->beginResponse(200, "text/html",
+            (const uint8_t*)pg, strlen(pg)));
     });
 
-    // Serve CSS
+    // Serve CSS — served directly from flash (static const) to avoid large heap copy
     server.on("/style.css", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        request->send(200, "text/css", generateCSS());
+        const char* css = generateCSS();
+        request->send(request->beginResponse(200, "text/css",
+            (const uint8_t*)css, strlen(css)));
     });
 
-    // Serve JavaScript
+    // Serve JavaScript — served directly from flash (static const) to avoid large heap copy
     server.on("/script.js", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        AsyncWebServerResponse *resp = request->beginResponse(200, "application/javascript", generateJavaScript());
+        const char* js = generateJavaScript();
+        AsyncWebServerResponse *resp = request->beginResponse(200, "application/javascript",
+            (const uint8_t*)js, strlen(js));
         resp->addHeader("Cache-Control", "no-store");
         request->send(resp);
     });
@@ -230,6 +237,338 @@ void CANWebServer::begin(const char* ssid, const char* password) {
         request->send(200, "application/json", resp);
     });
 
+    /* -----------------------------------------------------------------------
+       SPIFFS initialisation — format on first boot if blank.
+       Must succeed before registering DBC endpoints. */
+    spiffs_mounted = SPIFFS.begin(/* formatOnFail= */ true);
+    if (!spiffs_mounted) {
+        if (g_serial_logging && g_serial_mode == 0) {
+            Serial.println("[DBC] SPIFFS mount failed — DBC upload unavailable");
+        }
+    } else {
+        if (g_serial_logging && g_serial_mode == 0) {
+            Serial.printf("[DBC] SPIFFS mounted — total %u B, used %u B\n",
+                          (unsigned)SPIFFS.totalBytes(), (unsigned)SPIFFS.usedBytes());
+        }
+        /* Load all previously-selected DBC files on startup. */
+        reload_dbc_parser();
+        /* Load marker plan and restore step/run from NVS. */
+        g_marker_plan.begin();
+    }
+
+    /* /dbc — DBC file management page */
+    server.on("/dbc", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        request->send(200, "text/html", generateDBCPage());
+    });
+
+    /* /tx — Periodic transmit scheduler page */
+    server.on("/tx", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        request->send(200, "text/html", generateTxPage());
+    });
+
+    /* /api/tx/list — JSON array of scheduler entries */
+    server.on("/api/tx/list", HTTP_GET, [](AsyncWebServerRequest* request) {
+        request->send(200, "application/json", g_tx_sched.to_json());
+    });
+
+    /* /api/tx/add — POST: id=<hex>, bus=0|1, interval=<ms>, counter_byte=<-1..7>,
+       data=<16 hex chars AABBCC...>, label=<string> */
+    server.on("/api/tx/add", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!request->hasParam("id", true) || !request->hasParam("interval", true)) {
+            request->send(400, "application/json", "{\"ok\":false,\"error\":\"missing id or interval\"}");
+            return;
+        }
+        TxEntry e;
+        memset(&e, 0, sizeof(e));
+
+        String id_str = request->getParam("id", true)->value();
+        e.can_id = (uint32_t)strtoul(id_str.c_str(), nullptr, 16);
+
+        e.interval_ms  = (uint16_t)constrain(
+            request->getParam("interval", true)->value().toInt(), 1, 60000);
+        e.bus          = request->hasParam("bus", true)
+                         ? (uint8_t)constrain(request->getParam("bus", true)->value().toInt(), 0, 1)
+                         : 0;
+        e.counter_byte = request->hasParam("counter_byte", true)
+                         ? (int8_t)constrain(request->getParam("counter_byte", true)->value().toInt(), -1, 7)
+                         : -1;
+        e.enabled      = true;
+
+        /* Parse hex data string e.g. "AABB00001234FFFF" */
+        if (request->hasParam("data", true)) {
+            String hex = request->getParam("data", true)->value();
+            for (int i = 0; i < 8 && (i * 2 + 1) < (int)hex.length(); i++) {
+                char b[3] = { hex[i * 2], hex[i * 2 + 1], '\0' };
+                e.data[i] = (uint8_t)strtoul(b, nullptr, 16);
+            }
+        }
+
+        if (request->hasParam("label", true)) {
+            String lbl = request->getParam("label", true)->value();
+            strncpy(e.label, lbl.c_str(), sizeof(e.label) - 1);
+            e.label[sizeof(e.label) - 1] = '\0';
+        }
+
+        int idx = g_tx_sched.add(e);
+        if (idx < 0) {
+            request->send(507, "application/json", "{\"ok\":false,\"error\":\"table full\"}");
+        } else {
+            request->send(200, "application/json",
+                "{\"ok\":true,\"idx\":" + String(idx) + "}");
+        }
+    });
+
+    /* /api/tx/remove — POST idx=<n> */
+    server.on("/api/tx/remove", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!request->hasParam("idx", true)) {
+            request->send(400, "application/json", "{\"ok\":false,\"error\":\"missing idx\"}");
+            return;
+        }
+        int idx = request->getParam("idx", true)->value().toInt();
+        g_tx_sched.remove(idx);
+        request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    /* /api/tx/enable — POST idx=<n>&enabled=1|0 */
+    server.on("/api/tx/enable", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!request->hasParam("idx", true) || !request->hasParam("enabled", true)) {
+            request->send(400, "application/json", "{\"ok\":false,\"error\":\"missing params\"}");
+            return;
+        }
+        int  idx = request->getParam("idx",     true)->value().toInt();
+        bool en  = request->getParam("enabled", true)->value().toInt() != 0;
+        g_tx_sched.set_enabled(idx, en);
+        request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    /* /markers — test plan execution page */
+    server.on("/markers", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        request->send(200, "text/html", generateMarkersPage());
+    });
+
+    /* /api/markers/state — current plan state as JSON */
+    server.on("/api/markers/state", HTTP_GET, [](AsyncWebServerRequest* request) {
+        request->send(200, "application/json", g_marker_plan.to_json());
+    });
+
+    /* /api/markers/mark — inject marker frame for current step, advance */
+    server.on("/api/markers/mark", HTTP_POST, [](AsyncWebServerRequest* request) {
+        g_marker_plan.mark();
+        request->send(200, "application/json", g_marker_plan.to_json());
+    });
+
+    /* /api/markers/reset — go to step 0, increment run index */
+    server.on("/api/markers/reset", HTTP_POST, [](AsyncWebServerRequest* request) {
+        g_marker_plan.reset();
+        request->send(200, "application/json", g_marker_plan.to_json());
+    });
+
+    /* /api/markers/plan — POST steps=<newline-separated labels> */
+    server.on("/api/markers/plan", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (!request->hasParam("steps", true)) {
+            request->send(400, "application/json",
+                          "{\"ok\":false,\"error\":\"missing steps\"}");
+            return;
+        }
+        bool ok = g_marker_plan.save_plan(
+            request->getParam("steps", true)->value());
+        request->send(200, "application/json",
+                      ok ? "{\"ok\":true}" :
+                           "{\"ok\":false,\"error\":\"write failed\"}");
+    });
+    server.on("/api/dbc/list", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        request->send(200, "application/json", get_dbc_file_list_json());
+    });
+
+    /* /api/dbc/signals — full parsed signal database as JSON for browser-side decode.
+       Fetched once at page load; browser caches and decodes all signals in-browser. */
+    server.on("/api/dbc/signals", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        if (reload_dbc_pending) {
+            reload_dbc_pending = false;
+            reload_dbc_parser();
+        }
+        request->send(200, "application/json", dbc_parser.to_json());
+    });
+
+    /* /api/dbc/select — POST file=<name.dbc>&enable=1|0
+       enable=1 (default): add to active list and reload parser.
+       enable=0: remove from active list and reload parser. */
+    server.on("/api/dbc/select", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (!request->hasParam("file", true)) {
+            request->send(400, "application/json", "{\"error\":\"Missing file param\"}");
+            return;
+        }
+        String fname = sanitize_dbc_filename(request->getParam("file", true)->value());
+        String path  = "/" + fname;
+
+        if (!SPIFFS.exists(path)) {
+            request->send(404, "application/json", "{\"error\":\"File not found\"}");
+            return;
+        }
+
+        bool enable = true;
+        if (request->hasParam("enable", true)) {
+            enable = (request->getParam("enable", true)->value() != "0");
+        }
+
+        if (enable && !is_in_dbc_list(g_cfg.active_dbcs, fname.c_str())) {
+            /* Count currently active files. */
+            int active_count = (g_cfg.active_dbcs[0] != '\0') ? 1 : 0;
+            for (const char* p = g_cfg.active_dbcs; *p; p++) {
+                if (*p == ',') active_count++;
+            }
+            if (active_count >= 4) {
+                request->send(409, "application/json",
+                    "{\"error\":\"Max 4 DBC files active at once — deselect one first\"}");
+                return;
+            }
+            /* Warn if the file is very large (likely to hit signal cap). */
+            File chk = SPIFFS.open(path, "r");
+            size_t fsz = chk ? chk.size() : 0;
+            if (chk) chk.close();
+            if (fsz > 150 * 1024UL && dbc_parser.signal_count() > DBC_MAX_SIGNALS / 2) {
+                /* Not a hard block — just log; the cap protects us. */
+                if (g_serial_logging && g_serial_mode == 0) {
+                    Serial.printf("[DBC] Warning: enabling large file %s (%u KB) "
+                                  "with %u/%u signals already loaded\n",
+                                  fname.c_str(), (unsigned)(fsz/1024),
+                                  (unsigned)dbc_parser.signal_count(), DBC_MAX_SIGNALS);
+                }
+            }
+        }
+
+        if (enable) {
+            add_to_dbc_list(g_cfg.active_dbcs, sizeof(g_cfg.active_dbcs), fname.c_str());
+        } else {
+            remove_from_dbc_list(g_cfg.active_dbcs, fname.c_str());
+        }
+        save_can_config(g_cfg);
+        reload_dbc_pending = true;
+
+        String resp = "{\"ok\":true,\"active_dbcs\":\"" + String(g_cfg.active_dbcs) + "\""
+                      ",\"messages\":" + String(dbc_parser.message_count()) +
+                      ",\"signals\":"  + String(dbc_parser.signal_count())  +
+                      ",\"sig_cap\":"  + String(DBC_MAX_SIGNALS) +
+                      ",\"capped\":"   + String(dbc_parser.signal_count() >= DBC_MAX_SIGNALS ? "true" : "false") + "}";
+        request->send(200, "application/json", resp);
+    });
+
+    /* /api/dbc/delete — POST file=<name.dbc> */
+    server.on("/api/dbc/delete", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        if (!request->hasParam("file", true)) {
+            request->send(400, "application/json", "{\"error\":\"Missing file param\"}");
+            return;
+        }
+        String fname = sanitize_dbc_filename(request->getParam("file", true)->value());
+        String path  = "/" + fname;
+
+        if (!SPIFFS.exists(path)) {
+            request->send(404, "application/json", "{\"error\":\"File not found\"}");
+            return;
+        }
+        SPIFFS.remove(path);
+
+        /* Remove from active list if present, persist, reload parser. */
+        remove_from_dbc_list(g_cfg.active_dbcs, fname.c_str());
+        save_can_config(g_cfg);
+        reload_dbc_pending = true;
+
+        request->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    /* /api/dbc/upload — multipart POST, saves file to SPIFFS.
+       Guards: max size, SPIFFS space, DBC content validation (must contain BO_/SG_ lines).
+       _tempObject encodes result: 0=fail, 1=ok, 2=too large, 3=invalid DBC, 4=SPIFFS full. */
+    server.on("/api/dbc/upload", HTTP_POST,
+        /* Completion handler */
+        [](AsyncWebServerRequest* request) {
+            intptr_t status = (intptr_t)request->_tempObject;
+            switch (status) {
+                case 1:
+                    request->send(200, "application/json", "{\"ok\":true}");
+                    break;
+                case 2:
+                    request->send(413, "application/json",
+                        "{\"error\":\"File exceeds 512 KB limit\", \"code\":2}");
+                    break;
+                case 3:
+                    request->send(400, "application/json",
+                        "{\"error\":\"Not a valid DBC file — no BO_ or SG_ definitions found\", \"code\":3}");
+                    break;
+                case 4:
+                    request->send(507, "application/json",
+                        "{\"error\":\"SPIFFS storage full — delete a file first\", \"code\":4}");
+                    break;
+                default:
+                    request->send(500, "application/json", "{\"error\":\"Upload failed\"}");
+                    break;
+            }
+        },
+        /* Chunk handler */
+        [](AsyncWebServerRequest* request, const String& filename,
+           size_t index, uint8_t* data, size_t len, bool final) {
+            static File   upload_file;
+            static bool   upload_has_dbc;   /* found BO_ or SG_ marker */
+            static char   upload_path[64];
+
+            if (index == 0) {
+                request->_tempObject = nullptr;
+                upload_has_dbc = false;
+                String fname = CANWebServer::sanitize_dbc_filename(filename);
+                String path  = "/" + fname;
+                strncpy(upload_path, path.c_str(), sizeof(upload_path) - 1);
+                upload_path[sizeof(upload_path) - 1] = '\0';
+
+                /* Check SPIFFS free space (keep 4 KB reserve). */
+                if (SPIFFS.totalBytes() - SPIFFS.usedBytes() < 4096) {
+                    request->_tempObject = (void*)4;
+                    return;
+                }
+
+                upload_file = SPIFFS.open(path, "w");
+                if (!upload_file) return;  /* _tempObject stays nullptr → 500 */
+                request->_tempObject = (void*)0xFF;  /* open, not yet validated */
+            }
+
+            if ((intptr_t)request->_tempObject == 4) return;  /* SPIFFS full — drain */
+            if (!upload_file) return;
+
+            /* Enforce maximum file size. */
+            if (index + len > DBC_MAX_FILE_BYTES) {
+                upload_file.close();
+                SPIFFS.remove(String(upload_path));
+                request->_tempObject = (void*)2;
+                return;
+            }
+
+            /* Scan this chunk for DBC content markers. */
+            if (!upload_has_dbc) {
+                const char* d = (const char*)data;
+                for (size_t i = 0; i + 2 < len; i++) {
+                    if ((d[i]=='B' && d[i+1]=='O' && d[i+2]=='_') ||
+                        (d[i]=='S' && d[i+1]=='G' && d[i+2]=='_') ||
+                        (d[i]=='V' && d[i+1]=='E' && d[i+2]=='R')) {
+                        upload_has_dbc = true;
+                        break;
+                    }
+                }
+            }
+
+            upload_file.write(data, len);
+
+            if (final) {
+                upload_file.close();
+                if (!upload_has_dbc) {
+                    /* Looks like binary or non-DBC text — reject. */
+                    SPIFFS.remove(String(upload_path));
+                    request->_tempObject = (void*)3;
+                } else {
+                    request->_tempObject = (void*)1;
+                }
+            }
+        }
+    );
+
     // Start server
     server.begin();
     if (g_serial_logging && g_serial_mode == 0) { Serial.println("Web server started successfully"); }
@@ -297,6 +636,12 @@ void CANWebServer::begin(const char* ssid, const char* password) {
 }
 
 void CANWebServer::update() {
+    // Deferred DBC reload — executed here (loop context) to avoid blocking the AsyncTCP/WiFi task
+    if (reload_dbc_pending) {
+        reload_dbc_pending = false;
+        reload_dbc_parser();
+    }
+
     // Send data to clients every 100ms
     unsigned long now = millis();
     if (now - last_update >= 100) {
@@ -339,8 +684,7 @@ void CANWebServer::onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient
         case WS_EVT_DATA: {
             AwsFrameInfo *info = (AwsFrameInfo*)arg;
             if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-                data[len] = 0; // Null terminate
-                String command = String((char*)data);
+                String command = String((char*)data, len); // Safe: length-bounded, no OOB write
                 processCommand(client, command);
             }
             break;
@@ -422,8 +766,9 @@ void CANWebServer::processCommand(AsyncWebSocketClient *client, const String& co
     }
     else if (command == "clear") {
         if (can_bridge && can_bridge->getAnalysis()) {
-            if (g_serial_logging && g_serial_mode == 0) { Serial.println("Clear command received - would reset analysis data"); }
-            client->text("Data cleared");
+            can_bridge->getAnalysis()->clearAll();
+            if (g_serial_logging && g_serial_mode == 0) { Serial.println("Clear command received - analysis data reset"); }
+            client->text("{\"cleared\":true}");
         }
     }
     else if (command == "snapshot") {
@@ -503,16 +848,18 @@ const char* CANWebServer::generateMainPage() {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CAN Reverse Engineering Tool</title>
+    <script>(function(){var t=localStorage.getItem('theme')||'light';document.documentElement.dataset.theme=t;})();</script>
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
     <div class="header-bar">
         <div class="header-left">
             <span class="tool-name">CAN REVERSE ENGINEERING</span>
+            <span class="tool-version" style="color:#7f8c8d;font-size:10px;font-weight:400">v0.2.0</span>
             <span class="status">
                 <span id="connection-status">○</span> WebSocket
             </span>
-            <span class="bus-info">CAN0: 500k</span>
+            <span class="bus-info" id="bus-speed-info">CAN0: 500k</span>
         </div>
         <div class="header-right">
             <span class="status">
@@ -521,15 +868,10 @@ const char* CANWebServer::generateMainPage() {
             <span class="message-count">Messages: <span id="total-messages">0</span></span>
             <button id="serial-log-btn" class="btn small" onclick="toggleSerialLogging()" style="background:#e67e22;border-color:#e67e22">⬤ Serial Log</button>
             <button id="theme-btn" class="btn small secondary" onclick="toggleTheme()">☀ Theme</button>
-            <a href="/config" class="btn small secondary" style="text-decoration:none">⚙ Config</a>
-        </div>
-    </div>
-
-    <div class="control-panel">
-        <div class="control-row">
-            <input type="text" class="filter-input" placeholder="Filter by ID or description...">
-            <button class="btn small secondary" id="clear-btn">Clear</button>
-            <button class="btn small primary" id="export-btn">Export</button>
+            <a href="/config" class="btn small secondary" style="text-decoration:none">&#9881; Config</a>
+            <a href="/dbc" class="btn small secondary" style="text-decoration:none">&#128196; DBC</a>
+            <a href="/tx" class="btn small secondary" style="text-decoration:none">&#128257; TX Sched</a>
+            <a href="/markers" class="btn small secondary" style="text-decoration:none">&#128204; Markers</a>
         </div>
     </div>
 
@@ -616,32 +958,6 @@ const char* CANWebServer::generateMainPage() {
                     </div>
                 </div>
 
-                <div class="testing-controls">
-                    <h3>🧪 Testing Controls</h3>
-                    <div class="control-buttons">
-                        <button class="btn small secondary" id="capture-btn">Capture</button>
-                    </div>
-                    <div class="custom-payload">
-                        <div class="payload-editor">
-                            <input type="text" class="byte-input" maxlength="2" value="00">
-                            <input type="text" class="byte-input" maxlength="2" value="00">
-                            <input type="text" class="byte-input" maxlength="2" value="00">
-                            <input type="text" class="byte-input" maxlength="2" value="00">
-                            <input type="text" class="byte-input" maxlength="2" value="00">
-                            <input type="text" class="byte-input" maxlength="2" value="00">
-                            <input type="text" class="byte-input" maxlength="2" value="00">
-                            <input type="text" class="byte-input" maxlength="2" value="00">
-                        </div>
-                        <div class="payload-actions">
-                            <button class="btn small primary" id="send-custom">Send</button>
-                            <button class="btn small secondary" id="copy-payload">Copy</button>
-                        </div>
-                    </div>
-                    <div class="status-display">
-                        <span>Status: <span id="test-status">Ready</span></span>
-                        <span>Sent: <span id="sent-count">0</span></span>
-                    </div>
-                </div>
             </div>
         </div>
 
@@ -808,39 +1124,16 @@ body {
     font-size: 10px;
 }
 
-.control-panel {
-    position: fixed;
-    top: 40px;
-    left: 0;
-    right: 0;
-    background: var(--control-bg);
-    border-bottom: 1px solid var(--border);
-    padding: 10px 20px;
-    z-index: 999;
-}
-
-.control-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-}
-
-.control-row:last-child {
-    margin-bottom: 0;
-}
-
-
 .main-container {
     position: fixed;
-    top: 90px;
+    top: 40px;
     left: 0;
     right: 0;
     bottom: 0;
     display: flex;
     gap: 2px;
     background: var(--bg);
-    height: calc(100vh - 90px);
+    height: calc(100vh - 40px);
 }
 
 .left-panel,
@@ -966,6 +1259,19 @@ body {
     background: rgba(231, 76, 60, 0.1);
     border-color: #e74c3c;
     animation: pulse 1s ease-in-out;
+}
+
+/* Signal age / activity colour coding */
+.message-item.active-changing {
+    border-left-color: #2ecc71 !important; /* green — data changing */
+}
+.message-item.active-static {
+    border-left-color: #3498db !important; /* blue — data stable */
+}
+.message-item.stale {
+    opacity: 1;
+    background: rgba(127, 140, 141, 0.08);
+    border-left-color: #7f8c8d !important; /* grey — update timeout exceeded */
 }
 
 @keyframes pulse {
@@ -1309,61 +1615,6 @@ body {
     text-align: right;
 }
 
-.testing-controls {
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--overlay-light);
-}
-
-.testing-controls h3 {
-    background: var(--panel-header);
-    color: var(--text-on-header);
-    padding: 8px 12px;
-    margin: 0;
-    font-size: 11px;
-    border-radius: 6px 6px 0 0;
-}
-
-.control-buttons {
-    display: flex;
-    gap: 8px;
-    padding: 12px;
-}
-
-.custom-payload {
-    padding: 0 12px 12px;
-}
-
-.payload-editor {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 8px;
-}
-
-.byte-input {
-    width: 30px;
-    padding: 4px;
-    background: var(--input-bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    text-align: center;
-    font-family: 'Monaco', monospace;
-    font-size: 11px;
-    border-radius: 3px;
-}
-
-.byte-input:focus {
-    outline: none;
-    border-color: #3498db;
-    background: var(--input-focus-bg);
-}
-
-.byte-input.modified {
-    border-color: #f39c12;
-    background: rgba(243, 156, 18, 0.2);
-    box-shadow: 0 0 4px rgba(243, 156, 18, 0.3);
-}
-
 .btn.danger {
     background: #e74c3c;
     border-color: #c0392b;
@@ -1372,20 +1623,6 @@ body {
 .btn.danger:hover {
     background: #c0392b;
     border-color: #a93226;
-}
-
-.payload-actions {
-    display: flex;
-    gap: 8px;
-}
-
-.status-display {
-    display: flex;
-    gap: 20px;
-    padding: 8px 12px;
-    background: var(--overlay-light);
-    border-top: 1px solid var(--border);
-    font-size: 10px;
 }
 
 .activity-list {
@@ -1620,12 +1857,8 @@ label {
         padding: 8px;
     }
 
-    .control-panel {
-        top: 60px;
-    }
-
     .main-container {
-        top: 140px;
+        top: 72px;
     }
 
     .control-row {
@@ -1638,71 +1871,26 @@ label {
 
 const char* CANWebServer::generateJavaScript() {
     static const char content[] = R"js(
-const LEAF_CAN_IDS = {
-    // sig fields: sb=startBit, bl=bitLength, mo=Motorola(true)/Intel(false),
-    //             si=signed, sc=scale, of=offset, unit, min/max (optional, for bar)
-    '0x1db': { desc: 'BMS Status (V/I/relay)', signals: [
-        {name:'Current',     sb:7,  bl:11, mo:true,  si:true,  sc:0.5,  of:0,   unit:'A',  min:-500, max:500},
-        {name:'Voltage',     sb:23, bl:10, mo:true,  si:false, sc:0.5,  of:0,   unit:'V',  min:200,  max:420},
-        {name:'MainRelayON', sb:29, bl:1,  mo:false, si:false, sc:1,    of:0,   unit:''},
-        {name:'Interlock',   sb:27, bl:1,  mo:false, si:false, sc:1,    of:0,   unit:''},
-    ]},
-    '0x1dc': { desc: 'BMS Charge Power Limits', signals: [
-        {name:'DischargeLim',  sb:7,  bl:10, mo:true, si:false, sc:0.25, of:0,   unit:'kW', min:0, max:100},
-        {name:'ChargeLim',     sb:13, bl:10, mo:true, si:false, sc:0.25, of:0,   unit:'kW', min:0, max:100},
-        {name:'MaxChargerPwr', sb:19, bl:10, mo:true, si:false, sc:0.1,  of:-10, unit:'kW', min:0, max:50},
-    ]},
-    '0x1d4': { desc: 'VCM Charge Request (keepalive)' },
-    '0x1f2': { desc: 'VCM Charging Status' },
-    '0x55b': { desc: 'BMS SOC', signals: [
-        {name:'SOC',          sb:7,  bl:10, mo:true,  si:false, sc:0.1, of:0, unit:'%', min:0, max:100},
-        {name:'CapacityEmpty',sb:55, bl:1,  mo:false, si:false, sc:1,   of:0, unit:''},
-    ]},
-    '0x5bc': { desc: 'BMS GIDs / SOH (ZE0: also AvgTemp@byte3)', signals: [
-        {name:'GIDs',        sb:7,  bl:10, mo:true,  si:false, sc:1, of:0,   unit:'GID', min:0, max:281},
-        {name:'SOH',         sb:33, bl:7,  mo:false, si:false, sc:1, of:0,   unit:'%',  min:0, max:100},
-        {name:'AvgTemp(ZE0)',sb:24, bl:8,  mo:false, si:false, sc:1, of:-40, unit:'\u00b0C', min:-40, max:60},
-    ]},
-    '0x5c0': { desc: 'BMS Temp/Heater (AZE0)' },
-    '0x59e': { desc: 'BMS QC Capacity — LB_Full_Capacity_for_QC / LB_Remain_Capacity_for_QC' },
-    '0x50b': { desc: 'VCM Wakeup/Sleep Command' },
-    '0x50c': { desc: 'VCM Alive Counter' },
-    '0x3b2': { desc: 'PDU CHAdeMO Charge Request' },
-    '0x3b8': { desc: 'ZE1 BMS Keepalive (ZE1 only)' },
-    '0x1ed': { desc: 'ZE1 BMS Max Charger Power (62kWh only)' },
-    '0x5ec': { desc: 'ZE1 Keepalive 500ms' },
-    '0x5c5': { desc: 'ZE1 Keepalive (clears U214E)' },
-    '0x626': { desc: 'ZE1 Keepalive (clears U215B)' },
-    '0x7bb': { desc: 'OBD BMS Diagnostic Response' },
-    '0x79b': { desc: 'LeafSpy Polling Detect' },
-    // CHAdeMO QC-CAN IDs
-    '0x100': { desc: 'CHAdeMO EV\u2192EVSE: MaxBattV, MinChargeA, protocol' },
-    '0x101': { desc: 'CHAdeMO EV\u2192EVSE: Max charge time, rated capacity' },
-    '0x102': { desc: 'CHAdeMO EV\u2192EVSE: TargetV/A, status, ChargingRate%' },
-    '0x108': { desc: 'CHAdeMO EVSE\u2192EV: AvailV/A, ThresholdV' },
-    '0x109': { desc: 'CHAdeMO EVSE\u2192EV: OutputV/A, remaining time, status' },
-    '0x200': { desc: 'CHAdeMO V2H: max discharge A, min discharge V' },
-    // ZE1 CARCAN mirrors of CHAdeMO QC-CAN
-    '0x3b9': { desc: 'ZE1 mirror \u2190 QC 0x100: CHAdeMO EV params' },
-    '0x3bb': { desc: 'ZE1 mirror \u2190 QC 0x101: CHAdeMO EV timing' },
-    '0x3bc': { desc: 'ZE1 mirror \u2190 QC 0x102: CHAdeMO EV status' },
-    '0x3c8': { desc: 'ZE1 mirror \u2190 QC 0x108: CHAdeMO EVSE power' },
-    '0x3c9': { desc: 'ZE1 mirror \u2190 QC 0x109: CHAdeMO EVSE status' },
-    '0x3be': { desc: 'ZE1 mirror \u2190 QC 0x200: CHAdeMO V2H' },
-    '0x4bc': { desc: 'ZE1 mirror \u2190 QC 0x700: CHAdeMO mfr optional' },
-    // OBC IDs
-    '0x380': { desc: 'ZE0 OBC Status (QC IR sensor, output power, QC relay, AC voltage)' },
-    '0x5bf': { desc: 'ZE0 OBC J1772 Current Limiter' },
-    '0x390': { desc: 'AZE0/ZE1 OBC (AC voltage type, QC relay, max charge power)' },
-    '0x393': { desc: 'AZE0/ZE1 OBC Unknown' },
-    // SPUD VCU \u2194 Dash messages (private CAN bus)
-    '0x61a': { desc: 'SPUD Dash\u2192VCU: status, bmode, cruise, maxCharge' },
-    '0x62a': { desc: 'SPUD VCU\u2192Dash: HV V/I, motor RPM, throttle, speed, VCU state, brake' },
-    '0x62b': { desc: 'SPUD VCU\u2192Dash: relay states, gear, limp/cruise, LV V, SoC, charge rate, brake vac' },
-    '0x62c': { desc: 'SPUD VCU\u2192Dash: odometer/hour meter, inv/motor/batt temps' },
-    '0x62d': { desc: 'SPUD VCU\u2192Dash: min/max cell V, energy remaining, total capacity' },
-    '0x63a': { desc: 'SPUD DTC Broadcast: lamp status, DTC type, DTC code' },
-};
+/* DBC signal database — populated at page load from /api/dbc/signals.
+   Keys are lowercase hex IDs (e.g. "0x1db"), values are arrays of signal objects:
+   {n, sb, bl, le, si, sc, of, u, mn, mx} */
+let dbcSignals = {};
+
+function loadDBCSignals() {
+    fetch('/api/dbc/signals')
+        .then(r => r.json())
+        .then(data => {
+            dbcSignals = data;
+            /* Re-render the message list so description column reflects the loaded/cleared DBC. */
+            if (analyzer) analyzer.updateMessageList();
+        })
+        .catch(() => {});
+}
+
+/* Reload signals whenever the user returns to this tab (e.g. from the DBC page). */
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) loadDBCSignals();
+});
 
 class CANAnalyzer {
     constructor() {
@@ -1742,6 +1930,12 @@ class CANAnalyzer {
             this.updateCANDataStatus();
         }, 100);
 
+        // Periodic message list refresh: re-render every 3 seconds so new IDs
+        // that arrived via WebSocket appear without requiring a manual reload.
+        setInterval(() => {
+            this.updateMessageList();
+        }, 3000);
+
         setInterval(() => this.updateDisplay(), 100);
     }
 
@@ -1755,8 +1949,9 @@ class CANAnalyzer {
             this.isConnected = true;
             this.updateConnectionStatus();
             this.addActivity('WebSocket connected');
-            // Request a fresh snapshot immediately on connect
+            /* Request a fresh snapshot immediately on connect and reload DBC signals. */
             this.socket.send('snapshot');
+            loadDBCSignals();
         };
 
         this.socket.onmessage = (event) => {
@@ -1798,22 +1993,11 @@ class CANAnalyzer {
             btn.onclick = () => this.setSortBy(btn.dataset.sort, btn.dataset.bus);
         });
 
-        document.getElementById('clear-btn')?.addEventListener('click', () => this.clearData());
-        document.getElementById('export-btn')?.addEventListener('click', () => this.exportData());
-        document.getElementById('capture-btn')?.addEventListener('click', () => this.captureSnapshot());
-
         // Panel control buttons
         document.getElementById('block-can0-btn')?.addEventListener('click', () => this.blockSelectedMessage('can0'));
         document.getElementById('block-can1-btn')?.addEventListener('click', () => this.blockSelectedMessage('can1'));
         document.getElementById('pin-can0-btn')?.addEventListener('click', () => this.pinSelectedMessage('can0'));
         document.getElementById('pin-can1-btn')?.addEventListener('click', () => this.pinSelectedMessage('can1'));
-
-        this.setupPayloadEditor();
-
-        const filterInput = document.querySelector('.filter-input');
-        if (filterInput) {
-            filterInput.addEventListener('input', (e) => this.filterMessages(e.target.value));
-        }
 
         // Event delegation for message list clicks
         const messageLists = document.querySelectorAll('.message-list');
@@ -1869,49 +2053,6 @@ class CANAnalyzer {
         });
     }
 
-    setupPayloadEditor() {
-        const byteInputs = document.querySelectorAll('.byte-input');
-        byteInputs.forEach((input, index) => {
-            input.addEventListener('input', (e) => {
-                e.target.value = e.target.value.replace(/[^0-9A-Fa-f]/g, '').toUpperCase().slice(0, 2);
-                
-                // Visual feedback for modification
-                e.target.classList.add('modified');
-                setTimeout(() => {
-                    e.target.classList.remove('modified');
-                }, 1000);
-            });
-
-            input.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' || e.key === 'Tab') {
-                    const nextInput = byteInputs[index + 1];
-                    if (nextInput) nextInput.focus();
-                } else if (e.key === 'Escape') {
-                    // Reset to original value on Escape
-                    if (this.selectedMessage) {
-                        const msg = this.canData.get(this.selectedMessage);
-                        if (msg && msg.last_payload && msg.last_payload[index] !== undefined) {
-                            e.target.value = msg.last_payload[index].toString(16).padStart(2, '0').toUpperCase();
-                            this.addActivity('↶ Reset byte ' + index + ' to original value');
-                        }
-                    }
-                }
-            });
-
-            // Add focus/blur handlers for better UX
-            input.addEventListener('focus', (e) => {
-                e.target.style.borderColor = '#3498db';
-            });
-
-            input.addEventListener('blur', (e) => {
-                e.target.style.borderColor = '';
-            });
-        });
-
-        document.getElementById('send-custom')?.addEventListener('click', () => this.sendCustomMessage());
-        document.getElementById('copy-payload')?.addEventListener('click', () => this.copyCurrentPayload());
-    }
-
     processCANData(data) {
         console.log('Processing CAN data:', data); // Debug logging
         
@@ -1948,6 +2089,10 @@ class CANAnalyzer {
                 console.log('Processing ID:', idInfo.i, 'c0:', idInfo.c0, 'c1:', idInfo.c1); // Debug logging
                 const existing = this.canData.get(idInfo.i);
                 const isNew = !existing;
+                const payloadChanged = !!(existing && idInfo.p && idInfo.p !== existing.payload_hex);
+                const lastChangeTs = payloadChanged
+                    ? now
+                    : (existing ? (existing.last_change_timestamp || 0) : (idInfo.p ? now : 0));
 
                 if (isNew) {
                     newMessages++;
@@ -1963,11 +2108,18 @@ class CANAnalyzer {
                     can1_count: idInfo.c1 || 0,
                     last_bus: idInfo.b || 0,
                     blocked: idInfo.x === 1,
-                    description: (LEAF_CAN_IDS[idInfo.i.toLowerCase()] || {}).desc || '',
+                    description: '',  // populated by DBC once loaded
+                    payload_hex: idInfo.p || '',  // last payload bytes from WS summary
                     period: idInfo.r,
                     data: existing ? existing.data : '', // Keep existing payload if available
                     length: existing ? existing.length : 0,
-                    last_timestamp: existing ? existing.last_timestamp : Date.now()
+                    last_timestamp: now,
+                    last_payload: existing ? existing.last_payload : null,
+                    changes: existing ? existing.changes : null,
+                    /* Keep a per-ID "last changed" timestamp to avoid flicker between summary samples. */
+                    prev_payload_hex: existing ? existing.payload_hex : '',
+                    last_change_timestamp: lastChangeTs,
+                    is_changing: (lastChangeTs > 0) ? ((now - lastChangeTs) < 3000) : false
                 };
 
                 if (canMsg.period > 0) {
@@ -1986,10 +2138,9 @@ class CANAnalyzer {
             
             // Also refresh the total count in case WebSocket data is stale
             this.refreshTotalMessageCount();
+        } else {
+            console.log('No valid data format found, skipping processing');
         }
-
-        // No data to process
-        console.log('No valid data format found, skipping processing');
     }
 
     updateStatistics(stats) {
@@ -2098,11 +2249,32 @@ class CANAnalyzer {
             if (msg.changed) classes.push('changed');
             if (msg.blocked) classes.push('blocked');
 
+            /* Keep live rows readable and avoid whole-panel grey-out when
+               summary updates arrive in bursts. */
+            if (msg.is_changing || ((Date.now() - (msg.last_change_timestamp || 0)) < 3000)) {
+                classes.push('active-changing');
+            } else {
+                classes.push('active-static');
+            }
+
             const periodText = msg.periodMs ? msg.periodMs + 'ms' : (msg.period ? Math.round(msg.period) + 'Hz' : 'Static');
 
             html += '<div class="' + classes.join(' ') + '" data-message-id="' + msg.id + '" data-bus="' + busType + '">';
             html += '<span class="message-id">' + msg.id + '</span>';
-            html += '<span class="message-desc">' + (msg.description || 'Unknown') + '</span>';
+            /* Description policy:
+               - If selected DBC provides signals for this ID, show signal names.
+               - Otherwise show current payload bytes (live packet content). */
+            const idKey = msg.id.toLowerCase();
+            const sigs = dbcSignals[idKey];
+            let descText = '';
+            if (sigs && sigs.length > 0) {
+                descText = sigs.slice(0, 4).map(s => s.n).join(', ');
+                if (sigs.length > 4) descText += '…';
+            } else {
+                const payloadText = (msg.payload_hex || '').trim();
+                descText = payloadText.length > 0 ? payloadText : '(no payload yet)';
+            }
+            html += '<span class="message-desc">' + (descText || '') + '</span>';
             html += '<span class="message-period">' + periodText + '</span>';
             html += '<span class="message-pin" data-pin-id="' + msg.id + '">';
             html += this.pinnedMessages.has(msg.id) ? '📌' : '📍';
@@ -2163,8 +2335,6 @@ class CANAnalyzer {
         this.renderDecodedSignals(msg);
         // Bit-level visualization (hex viewer)
         this.updateHexViewer(msg);
-        // Show payload editor with bit-level changes
-        this.updatePayloadEditor(msg);
         // If you want to show a diff between previous and current payload, add here:
         // if (msg.prev_payload) {
         //   this.showBitDiff(msg.prev_payload, msg.last_payload);
@@ -2234,43 +2404,22 @@ class CANAnalyzer {
         hexData.innerHTML = html;
     }
 
-    updatePayloadEditor(msg) {
-        const inputs = document.querySelectorAll('.byte-input');
-        const bytes = msg.last_payload || [0, 0, 0, 0, 0, 0, 0, 0];
-        const changes = msg.changes || [];
-
-        inputs.forEach((input, index) => {
-            if (index < bytes.length) {
-                const byteValue = bytes[index].toString(16).padStart(2, '0').toUpperCase();
-                input.value = byteValue;
-                
-                // Highlight changed bytes
-                if (changes[index] && changes[index] > 0) {
-                    input.classList.add('modified');
-                } else {
-                    input.classList.remove('modified');
-                }
-            } else {
-                input.value = '00';
-                input.classList.remove('modified');
-            }
-        });
-    }
-
-    decodeSignal(bytes, sig) {
+    decodeSignalDBC(bytes, sig) {
+        /* sig fields from /api/dbc/signals: sb, bl, le (little-endian), si, sc, of */
         let raw = 0;
-        if (sig.mo) {
-            // Motorola big-endian: sig.sb is MSB position
+        if (!sig.le) {
+            /* Motorola big-endian: sig.sb is MSB position.
+               Walk toward LSB; at byte boundary (bit%8===0) jump to MSB of next byte. */
             let cur = sig.sb;
             for (let i = 0; i < sig.bl; i++) {
                 const byteIdx = Math.floor(cur / 8);
-                const bitInByte = cur % 8; // 7=MSB, 0=LSB within byte
+                const bitInByte = cur % 8;
                 if (byteIdx < bytes.length) raw = (raw << 1) | ((bytes[byteIdx] >> bitInByte) & 1);
-                if (cur % 8 === 0) cur += 15; // wrap to MSB of next byte
+                if (cur % 8 === 0) cur += 15;
                 else cur -= 1;
             }
         } else {
-            // Intel little-endian: sig.sb is LSB position
+            /* Intel little-endian: sig.sb is LSB position. */
             for (let i = 0; i < sig.bl; i++) {
                 const bit = sig.sb + i;
                 const byteIdx = Math.floor(bit / 8);
@@ -2278,7 +2427,7 @@ class CANAnalyzer {
                 if (byteIdx < bytes.length) raw |= ((bytes[byteIdx] >> bitInByte) & 1) << i;
             }
         }
-        // Two's complement sign extension
+        /* Two's complement sign extension. */
         if (sig.si && (raw & (1 << (sig.bl - 1)))) raw -= (1 << sig.bl);
         return raw * (sig.sc || 1) + (sig.of || 0);
     }
@@ -2286,26 +2435,31 @@ class CANAnalyzer {
     renderDecodedSignals(msg) {
         const container = document.getElementById('decoded-signals');
         if (!container) return;
-        const known = LEAF_CAN_IDS[msg.id.toLowerCase()];
-        if (!known || !known.signals || known.signals.length === 0 || !msg.last_payload) {
+
+        const idKey = msg.id.toLowerCase();
+        const sigs = dbcSignals[idKey];
+
+        if (!sigs || sigs.length === 0 || !msg.last_payload) {
             container.style.display = 'none';
             return;
         }
+
         const bytes = msg.last_payload;
         let html = '';
-        for (const sig of known.signals) {
-            if (sig.sb === undefined) continue;
-            const value = this.decodeSignal(bytes, sig);
-            const displayVal = Number.isInteger(value) ? value : value.toFixed(2);
+        for (const sig of sigs) {
+            const value = this.decodeSignalDBC(bytes, sig);
+            const displayVal = (sig.bl === 1)
+                ? (value ? '1 (ON)' : '0 (OFF)')
+                : (Number.isInteger(value) ? value : value.toFixed(2));
             let barHtml = '';
-            if (sig.min !== undefined && sig.max !== undefined && sig.bl > 1) {
-                const pct = Math.max(0, Math.min(100, (value - sig.min) / (sig.max - sig.min) * 100));
+            if (sig.mn !== undefined && sig.mx !== undefined && sig.mn !== sig.mx && sig.bl > 1) {
+                const pct = Math.max(0, Math.min(100, (value - sig.mn) / (sig.mx - sig.mn) * 100));
                 barHtml = '<div class="sig-bar-wrap"><div class="sig-bar" style="width:' + pct.toFixed(1) + '%"></div></div>';
             }
-            html += '<div class="sig-row"><span class="sig-name">' + sig.name + '</span>' +
+            html += '<div class="sig-row"><span class="sig-name">' + sig.n + '</span>' +
                     barHtml +
                     '<span class="sig-value">' + displayVal + '</span>' +
-                    '<span class="sig-unit">' + (sig.unit || '') + '</span></div>';
+                    '<span class="sig-unit">' + (sig.u || '') + '</span></div>';
         }
         container.style.display = 'block';
         document.getElementById('sig-list').innerHTML = html;
@@ -2414,8 +2568,8 @@ class CANAnalyzer {
                     }
                     
                     // Add changes array if available
-                    if (data.analysis) {
-                        msg.changes = data.analysis.map(item => parseInt(item.changes || '0x0', 16));
+                    if (data.payload && data.payload.analysis) {
+                        msg.changes = data.payload.analysis.map(item => parseInt(item.changes || '0x0', 16));
                         console.log('Set changes:', msg.changes); // Debug logging
                     }
                     
@@ -2562,61 +2716,6 @@ class CANAnalyzer {
         container.innerHTML = html;
     }
 
-    sendCustomMessage() {
-        if (!this.selectedMessage) {
-            this.addActivity('⚠️ Please select a message first');
-            return;
-        }
-
-        const inputs = document.querySelectorAll('.byte-input');
-        const payload = Array.from(inputs).map(input => {
-            const val = input.value || '00';
-            return parseInt(val, 16);
-        });
-        const payloadHex = payload.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join('');
-
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                command: 'send_message',
-                id: this.selectedMessage,
-                payload: payload,
-                bus: this.selectedBus || 'can0'
-            }));
-            
-            // Update sent count
-            const sentCountEl = document.getElementById('sent-count');
-            if (sentCountEl) {
-                const currentCount = parseInt(sentCountEl.textContent) || 0;
-                sentCountEl.textContent = currentCount + 1;
-            }
-            
-            // Update status
-            const statusEl = document.getElementById('test-status');
-            if (statusEl) {
-                statusEl.textContent = 'Sent';
-                statusEl.style.color = '#2ecc71';
-                setTimeout(() => {
-                    statusEl.textContent = 'Ready';
-                    statusEl.style.color = '';
-                }, 1000);
-            }
-            
-            this.addActivity('📤 Sent custom message: ' + this.selectedMessage + ' [' + payloadHex + '] on ' + (this.selectedBus || 'CAN0'));
-        } else {
-            this.addActivity('❌ Cannot send: WebSocket not connected');
-            
-            const statusEl = document.getElementById('test-status');
-            if (statusEl) {
-                statusEl.textContent = 'Error';
-                statusEl.style.color = '#e74c3c';
-                setTimeout(() => {
-                    statusEl.textContent = 'Ready';
-                    statusEl.style.color = '';
-                }, 2000);
-            }
-        }
-    }
-
     copyCurrentPayload() {
         if (!this.selectedMessage) return;
 
@@ -2729,79 +2828,23 @@ class CANAnalyzer {
         });
     }
 
-    loadPayloadIntoEditor(msg) {
-        const inputs = document.querySelectorAll('.byte-input');
-        const bytes = msg.last_payload || [0, 0, 0, 0, 0, 0, 0, 0];
-        
-        inputs.forEach((input, index) => {
-            if (index < bytes.length) {
-                input.value = bytes[index].toString(16).padStart(2, '0').toUpperCase();
-            } else {
-                input.value = '00';
-            }
-        });
-        
-        this.addActivity('📝 Loaded payload into editor: ' + bytes.map(b => b.toString(16).padStart(2, '0')).join(' '));
-    }
-
-    startModifying(messageId) {
-        // Send modify start command to backend
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                command: 'start_modify',
-                id: messageId
-            }));
-        }
-        
-        // Enable continuous sending of modified payload
-        this.modifyInterval = setInterval(() => {
-            this.sendModifiedPayload(messageId);
-        }, 100); // Send every 100ms
-    }
-
-    stopModifying(messageId) {
-        // Clear the modify interval
-        if (this.modifyInterval) {
-            clearInterval(this.modifyInterval);
-            this.modifyInterval = null;
-        }
-        
-        // Send modify stop command to backend
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                command: 'stop_modify',
-                id: messageId
-            }));
-        }
-    }
-
-    sendModifiedPayload(messageId) {
-        const inputs = document.querySelectorAll('.byte-input');
-        const payload = Array.from(inputs).map(input => {
-            const val = input.value || '00';
-            return parseInt(val, 16);
-        });
-
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify({
-                command: 'send_modified',
-                id: messageId,
-                payload: payload
-            }));
-        }
-    }
 }
 
 let analyzer;
 document.addEventListener('DOMContentLoaded', () => {
-    // Restore saved theme
-    const savedTheme = localStorage.getItem('theme') || 'dark';
-    if (savedTheme === 'light') {
-        document.body.dataset.theme = 'light';
-        const btn = document.getElementById('theme-btn');
-        if (btn) btn.textContent = '\uD83C\uDF19 Theme';
-    }
+    // Theme is already applied to <html> by the inline head script — just sync the button label.
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    const btn = document.getElementById('theme-btn');
+    if (btn) btn.textContent = savedTheme === 'light' ? '\uD83C\uDF19 Theme' : '\u2600 Theme';
+    // Mirror theme attribute from <html> to <body> so existing CSS selectors still work.
+    document.body.dataset.theme = document.documentElement.dataset.theme;
     analyzer = new CANAnalyzer();
+    loadDBCSignals(); /* Fetch DBC signal definitions once — browser decodes all frames in-browser */
+    // Fetch actual bus speed from device and update header badge
+    fetch('/api/get_speed')
+        .then(r => r.json())
+        .then(d => { const el = document.getElementById('bus-speed-info'); if (el) el.textContent = 'Bus: ' + d.label; })
+        .catch(() => {});
     // Sync serial log button state on page load
     fetch('/api/serial_logging')
         .then(r => r.json())
@@ -2830,8 +2873,10 @@ function toggleSerialLogging() {
 
 function toggleTheme() {
     const isDark = document.body.dataset.theme !== 'light';
-    document.body.dataset.theme = isDark ? 'light' : '';
-    localStorage.setItem('theme', isDark ? 'light' : 'dark');
+    const t = isDark ? 'light' : 'dark';
+    document.body.dataset.theme = t;
+    document.documentElement.dataset.theme = t;
+    localStorage.setItem('theme', t);
     const btn = document.getElementById('theme-btn');
     if (btn) btn.textContent = isDark ? '\uD83C\uDF19 Theme' : '\u2600 Theme';
 }
@@ -2857,6 +2902,8 @@ String CANWebServer::generateConfigPage() {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CAN Logger - Config</title>
+<script>(function(){var t=localStorage.getItem('theme')||'light';document.documentElement.dataset.theme=t;document.documentElement.setAttribute('data-theme',t);})();</script>
+<script>(function(){var t=localStorage.getItem('theme')||'light';document.documentElement.dataset.theme=t;document.documentElement.setAttribute('data-theme',t);})();</script>
 <style>
 :root{--bg:#1a1a1a;--text:#e0e0e0;--text-dim:#7f8c8d;--text-hdr:#ecf0f1;--card:#252525;--card-hd:#34495e;--border:#34495e;--row-bdr:#2a2a2a;--in-bg:#2c3e50;--in-txt:#ecf0f1;--btn-s:#34495e;--btn-st:#ecf0f1;--hdr-dim:#95a5a6;--seg-off:#2c3e50;--seg-off-txt:#95a5a6}
 [data-theme="light"]{--bg:#f5f5f5;--text:#1a1a1a;--text-dim:#555;--text-hdr:#1a1a1a;--card:#fff;--card-hd:#dde3ea;--border:#c0c0c0;--row-bdr:#e5e5e5;--in-bg:#fff;--in-txt:#1a1a1a;--btn-s:#dde3ea;--btn-st:#1a1a1a;--hdr-dim:#666;--seg-off:#e0e0e0;--seg-off-txt:#666}
@@ -3057,13 +3104,18 @@ function applySerialMode() {
     });
 }
 (function(){
-  var t=localStorage.getItem('theme')||'dark';
-  if(t==='light'){document.body.dataset.theme='light';var b=document.getElementById('theme-btn');if(b)b.textContent='\uD83C\uDF19 Theme';}
+  var t=localStorage.getItem('theme')||'light';
+  document.documentElement.dataset.theme=t;
+  document.body.dataset.theme=t;
+  var b=document.getElementById('theme-btn');
+  if(b)b.textContent=t==='light'?'\uD83C\uDF19 Theme':'\u2600 Theme';
 })();
 function toggleTheme(){
   var d=document.body.dataset.theme!=='light';
-  document.body.dataset.theme=d?'light':'';
-  localStorage.setItem('theme',d?'light':'dark');
+  var t=d?'light':'dark';
+  document.body.dataset.theme=t;
+  document.documentElement.dataset.theme=t;
+  localStorage.setItem('theme',t);
   var b=document.getElementById('theme-btn');
   if(b)b.textContent=d?'\uD83C\uDF19 Theme':'\u2600 Theme';
 }
@@ -3098,7 +3150,16 @@ String CANWebServer::get_can_ids_summary() {
         summary += "\"c0\":" + String(stats.can0_count) + ",";
         summary += "\"c1\":" + String(stats.can1_count) + ",";
         summary += "\"b\":" + String(stats.last_bus_id) + ",";
-        summary += "\"x\":" + String(can_bridge->is_can_id_blocked(can_id) ? "1" : "0");
+        summary += "\"x\":" + String(can_bridge->is_can_id_blocked(can_id) ? "1" : "0") + ",";
+        /* Include last 8 payload bytes as compact hex string for description column. */
+        summary += "\"p\":\"";
+        for (int i = 0; i < 8; i++) {
+            char hx[3];
+            snprintf(hx, sizeof(hx), "%02X", stats.last_payload[i]);
+            summary += hx;
+            if (i < 7) summary += " ";
+        }
+        summary += "\"";
         summary += "}";
     }
     
@@ -3152,6 +3213,991 @@ String CANWebServer::get_selected_payload_detail(uint32_t can_id) {
     
     detail += "}";
     detail += "}";
-    
+
+    /* Append DBC-decoded signals if a database is loaded for this ID. */
+    if (dbc_parser.has_signals_for(can_id)) {
+        String signals_json;
+        dbc_parser.decode(can_id, stats.last_payload, 8, signals_json);
+        /* Remove closing braces we just added, insert signals field, re-close. */
+        detail.remove(detail.length() - 2);  /* strip last "}}" */
+        detail += ",\"signals\":";
+        detail += signals_json;
+        detail += "}}";
+    }
+
     return detail;
 }
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Marker plan page
+// ---------------------------------------------------------------------------
+
+String CANWebServer::generateMarkersPage() {
+    return R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Test Markers</title>
+<style>
+  :root{--mk-bg:#111;--mk-top:#1a1a1a;--mk-top-bdr:#333;--mk-text:#eee;--mk-dim:#aaa;
+        --mk-btn:#333;--mk-btn-bdr:#555;--mk-adj:#444;--mk-edit:#1a1a1a;--mk-edit-bdr:#555;
+        --mk-ta:#1a1a1a;--mk-ta-bdr:#555;--mk-help:rgba(0,0,0,.92);--mk-help-card:#1a1a1a;
+        --mk-help-bdr:#333;--mk-code:#222;--mk-code-bdr:#444}
+  [data-theme=light]{--mk-bg:#f0f0f0;--mk-top:#dde3ea;--mk-top-bdr:#c0c0c0;--mk-text:#111;
+        --mk-dim:#555;--mk-btn:#dde3ea;--mk-btn-bdr:#aaa;--mk-adj:#999;--mk-edit:#fff;
+        --mk-edit-bdr:#aaa;--mk-ta:#fff;--mk-ta-bdr:#aaa;--mk-help:rgba(0,0,0,.75);
+        --mk-help-card:#fff;--mk-help-bdr:#ccc;--mk-code:#f5f5f5;--mk-code-bdr:#ccc}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--mk-bg);color:var(--mk-text);font-family:-apple-system,sans-serif;
+       height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+  .topbar{display:flex;justify-content:space-between;align-items:center;
+          padding:8px 12px;background:var(--mk-top);border-bottom:1px solid var(--mk-top-bdr);
+          flex-shrink:0;gap:8px}
+  .run-badge{font-size:0.8rem;color:var(--mk-dim);white-space:nowrap}
+  .step-ctr{font-size:0.95rem;color:#2ecc71;font-weight:bold;white-space:nowrap}
+  .topbar-right{display:flex;gap:6px;flex-shrink:0}
+  .btn-sm{background:var(--mk-btn);border:1px solid var(--mk-btn-bdr);color:var(--mk-text);padding:6px 12px;
+          border-radius:4px;font-size:0.78rem;cursor:pointer;white-space:nowrap}
+  .btn-sm:active{background:var(--mk-adj)}
+
+  .step-area{flex:1;display:flex;flex-direction:column;justify-content:center;
+             align-items:center;padding:20px 24px;overflow:hidden;text-align:center}
+  .adj-step{font-size:0.9rem;color:var(--mk-adj);max-width:320px;line-height:1.4;
+            transition:color .2s}
+  .curr-label{font-size:1.8rem;font-weight:700;color:var(--mk-text);max-width:340px;
+              line-height:1.25;margin:20px 0;transition:all .3s}
+  .curr-label.empty{color:var(--mk-adj);font-size:1rem;font-weight:400}
+  .curr-label.done{color:#2ecc71}
+
+  .mark-wrap{flex-shrink:0;padding:12px}
+  .mark-btn{width:100%;height:100px;background:#27ae60;border:none;border-radius:14px;
+            color:#fff;font-size:2rem;font-weight:700;cursor:pointer;
+            display:flex;align-items:center;justify-content:center;gap:10px;
+            touch-action:manipulation;transition:background .15s,transform .1s}
+  .mark-btn:active{background:#1e8449;transform:scale(0.97)}
+  .mark-btn:disabled{background:var(--mk-btn);color:var(--mk-adj);cursor:default}
+
+  /* edit overlay */
+  .edit-overlay{display:none;position:fixed;inset:0;background:var(--mk-bg);z-index:100;
+                flex-direction:column;padding:14px;gap:10px}
+  .edit-overlay.open{display:flex}
+  .edit-overlay h2{font-size:1rem;font-weight:600}
+  .edit-hint{font-size:0.78rem;color:var(--mk-dim)}
+  .plan-ta{flex:1;background:var(--mk-ta);border:1px solid var(--mk-ta-bdr);color:var(--mk-text);
+           padding:10px;border-radius:6px;font-size:0.9rem;resize:none;
+           font-family:monospace}
+  .edit-row{display:flex;gap:10px}
+  .btn-save{flex:1;background:#2980b9;border:1px solid #2980b9;color:#fff;
+            padding:12px;border-radius:6px;font-size:1rem;cursor:pointer}
+  .btn-cancel{background:var(--mk-btn);border:1px solid var(--mk-btn-bdr);color:var(--mk-text);
+              padding:12px 16px;border-radius:6px;font-size:1rem;cursor:pointer}
+  .feedback{font-size:0.82rem;color:#2ecc71;align-self:center}
+
+  .flash{animation:flash .35s ease}
+  @keyframes flash{0%{background:#1e8449}100%{background:#27ae60}}
+
+  /* help overlay */
+  .help-overlay{display:none;position:fixed;inset:0;background:var(--mk-help);z-index:200;
+                overflow-y:auto;padding:20px 16px}
+  .help-overlay.open{display:block}
+  .help-card{background:var(--mk-help-card);border:1px solid var(--mk-help-bdr);border-radius:10px;
+             max-width:520px;margin:0 auto;padding:20px}
+  .help-card h2{font-size:1.1rem;color:#2ecc71;margin-bottom:14px}
+  .help-card h3{font-size:0.85rem;color:var(--mk-dim);text-transform:uppercase;
+                letter-spacing:.05em;margin:16px 0 6px}
+  .help-card p,.help-card li{font-size:0.88rem;color:var(--mk-text);line-height:1.55}
+  .help-card ul{padding-left:16px;margin:4px 0}
+  .help-card li{margin-bottom:4px}
+  .help-card code{background:var(--mk-code);border:1px solid var(--mk-code-bdr);border-radius:3px;
+                  padding:1px 5px;font-size:0.82rem;color:#f39c12}
+  .byte-table{width:100%;border-collapse:collapse;margin-top:6px;font-size:0.8rem}
+  .byte-table th,.byte-table td{padding:5px 8px;border:1px solid var(--mk-help-bdr);text-align:left}
+  .byte-table th{background:var(--mk-code);color:var(--mk-dim)}
+  .byte-table td:first-child{font-family:monospace;color:#f39c12}
+  .close-help{display:block;margin:16px auto 0;background:var(--mk-btn);border:1px solid var(--mk-btn-bdr);
+              color:var(--mk-text);padding:10px 24px;border-radius:6px;font-size:0.9rem;cursor:pointer}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="run-badge" id="run-badge">Run #0</span>
+  <span class="step-ctr" id="step-ctr">—</span>
+  <div class="topbar-right">
+    <button class="btn-sm" onclick="doReset()">&#8635; Reset</button>
+    <button class="btn-sm" onclick="openEdit()">&#9998; Plan</button>
+    <button class="btn-sm" onclick="openHelp()">?</button>
+    <button class="btn-sm" id="theme-btn" onclick="toggleTheme()">&#9728; Theme</button>
+    <button class="btn-sm" onclick="location.href='/'">&#8592; Back</button>
+  </div>
+</div>
+
+<div class="step-area">
+  <div class="adj-step" id="prev-step"></div>
+  <div class="curr-label" id="curr-label">Loading&hellip;</div>
+  <div class="adj-step" id="next-step"></div>
+</div>
+
+<div class="mark-wrap">
+  <button class="mark-btn" id="mark-btn" onclick="doMark()" disabled>&#10003; MARK</button>
+</div>
+
+<!-- Plan edit overlay -->
+<div class="edit-overlay" id="edit-overlay">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <h2>Test Plan</h2>
+    <span class="feedback" id="edit-fb"></span>
+  </div>
+  <p class="edit-hint">One step label per line &mdash; marked in order, top to bottom.</p>
+  <textarea class="plan-ta" id="plan-ta"
+    placeholder="Neutral&#10;Engage 1st gear&#10;Rev to 3000 rpm&#10;Shift to 2nd&#10;&hellip;"></textarea>
+  <div class="edit-row">
+    <button class="btn-cancel" onclick="closeEdit()">Cancel</button>
+    <button class="btn-save" onclick="savePlan()">Save Plan</button>
+  </div>
+</div>
+
+<!-- Help overlay -->
+<div class="help-overlay" id="help-overlay" onclick="if(event.target===this)closeHelp()">
+<div class="help-card">
+  <h2>&#128204; Test Markers — How It Works</h2>
+
+  <h3>Overview</h3>
+  <p>Markers embed timing events directly into your CAN log — the same stream SavvyCAN or GVRET
+  is recording — so there is no separate file to correlate afterwards.</p>
+
+  <h3>Workflow</h3>
+  <ul>
+    <li>Tap <strong>&#9998; Plan</strong> and write one step per line (e.g. "Engage 1st gear").</li>
+    <li>Tap <strong>Save Plan</strong>. The plan is stored on the device and survives reboots.</li>
+    <li>Start your serial logger (SavvyCAN or GVRET) before beginning the test.</li>
+    <li>Perform each physical action, then immediately tap <strong>MARK &amp; NEXT</strong>.</li>
+    <li>When finished, tap <strong>&#8635; Reset</strong> to start a new run (run counter increments).</li>
+  </ul>
+
+  <h3>What Gets Injected</h3>
+  <p>Each tap sends a synthetic CAN frame with ID <code>0x7FE</code> into the log stream:</p>
+  <table class="byte-table">
+    <tr><th>Byte</th><th>Value</th><th>Example</th></tr>
+    <tr><td>0</td><td>Step index (0-based)</td><td><code>03</code> = step 4</td></tr>
+    <tr><td>1</td><td>Run number</td><td><code>01</code> = 2nd run</td></tr>
+    <tr><td>2&ndash;5</td><td>millis() at tap (uint32 LE)</td><td>exact tap time</td></tr>
+    <tr><td>6</td><td>Total steps in plan</td><td><code>08</code></td></tr>
+    <tr><td>7</td><td>Magic byte <code>0xBE</code></td><td>easy to spot</td></tr>
+  </table>
+
+  <h3>In SavvyCAN</h3>
+  <ul>
+    <li>Filter by ID <code>0x7FE</code> to jump between events in the timeline.</li>
+    <li>The SavvyCAN row timestamp is the ground truth — millis() bytes are a secondary reference.</li>
+    <li>Byte 0 increments with each step, so a sequence <code>00 01 02 03…</code> confirms no taps were missed.</li>
+    <li>Byte 1 lets you separate multiple runs in the same recording session.</li>
+  </ul>
+
+  <h3>Tips</h3>
+  <ul>
+    <li>Keep step labels short — the current step fills most of the screen.</li>
+    <li>The step above/below is shown dimmed — glance to confirm you are at the right step before tapping.</li>
+    <li>If you tap one step early or late, don't stop — note the discrepancy and add a correction step to the plan next time.</li>
+    <li>Multiple phones / browser tabs all share the same step state — one person can drive, another can tap.</li>
+  </ul>
+
+  <button class="close-help" onclick="closeHelp()">Close</button>
+</div>
+</div>
+
+<script>
+let state = {step:0,run:0,total:0,steps:[]};
+let busy = false;
+
+function render(s) {
+  state = s;
+  const {step, run, total, steps} = s;
+  document.getElementById('run-badge').textContent = 'Run #' + run;
+  const btn  = document.getElementById('mark-btn');
+  const lbl  = document.getElementById('curr-label');
+  const prev = document.getElementById('prev-step');
+  const next = document.getElementById('next-step');
+
+  if (total === 0) {
+    document.getElementById('step-ctr').textContent = 'No plan';
+    lbl.className = 'curr-label empty';
+    lbl.textContent = 'No plan loaded \u2014 tap \u2712 Plan to add steps.';
+    prev.textContent = '';
+    next.textContent = '';
+    btn.disabled = true;
+    btn.textContent = '\u2713 MARK';
+    return;
+  }
+
+  const atEnd = (step >= total - 1);
+  document.getElementById('step-ctr').textContent = (step + 1) + ' / ' + total;
+  lbl.className = 'curr-label' + (atEnd && total > 1 ? ' done' : '');
+  lbl.textContent = steps[step] || ('Step ' + (step + 1));
+  prev.textContent = step > 0 ? '\u2191 ' + steps[step - 1] : '';
+  next.textContent = atEnd
+    ? (total > 1 ? '\u2014 end of plan \u2014' : '')
+    : '\u2193 ' + steps[step + 1];
+  btn.disabled = false;
+  btn.textContent = atEnd ? '\u2713 MARK FINAL' : '\u2713 MARK & NEXT';
+}
+
+function loadState() {
+  fetch('/api/markers/state').then(r => r.json()).then(render).catch(()=>{});
+}
+
+function doMark() {
+  if (busy) return;
+  busy = true;
+  const btn = document.getElementById('mark-btn');
+  btn.classList.add('flash');
+  fetch('/api/markers/mark', {method:'POST'})
+    .then(r => r.json()).then(render)
+    .finally(() => {
+      setTimeout(() => { btn.classList.remove('flash'); busy = false; }, 400);
+    });
+}
+
+function doReset() {
+  if (!confirm('Start new run? Step resets to 1.')) return;
+  fetch('/api/markers/reset', {method:'POST'}).then(r => r.json()).then(render);
+}
+
+function openEdit() {
+  document.getElementById('plan-ta').value = state.steps.join('\n');
+  document.getElementById('edit-fb').textContent = '';
+  document.getElementById('edit-overlay').classList.add('open');
+}
+
+function closeEdit() {
+  document.getElementById('edit-overlay').classList.remove('open');
+}
+
+function savePlan() {
+  const fd = new FormData();
+  fd.append('steps', document.getElementById('plan-ta').value);
+  fetch('/api/markers/plan', {method:'POST', body:fd})
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        document.getElementById('edit-fb').textContent = '\u2713 Saved';
+        loadState();
+        setTimeout(closeEdit, 600);
+      } else {
+        const fb = document.getElementById('edit-fb');
+        fb.style.color = '#e74c3c';
+        fb.textContent = '\u2717 ' + (d.error || 'error');
+      }
+    });
+}
+
+function openHelp()  { document.getElementById('help-overlay').classList.add('open'); }
+function closeHelp() { document.getElementById('help-overlay').classList.remove('open'); }
+
+(function(){
+  var t=localStorage.getItem('theme')||'light';
+  document.documentElement.dataset.theme=t;
+  document.body.dataset.theme=t;
+  var b=document.getElementById('theme-btn');
+  if(b)b.textContent=t==='light'?'\uD83C\uDF19 Theme':'\u2600 Theme';
+})();
+function toggleTheme(){
+  var d=document.body.dataset.theme!=='light';
+  var t=d?'light':'dark';
+  document.body.dataset.theme=t;
+  document.documentElement.dataset.theme=t;
+  localStorage.setItem('theme',t);
+  var b=document.getElementById('theme-btn');
+  if(b)b.textContent=d?'\uD83C\uDF19 Theme':'\u2600 Theme';
+}
+
+loadState();
+setInterval(loadState, 5000);
+</script>
+</body>
+</html>)html";
+}
+
+// ---------------------------------------------------------------------------
+// DBC helpers
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// TX Scheduler page
+// ---------------------------------------------------------------------------
+
+String CANWebServer::generateTxPage() {
+    String page = R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TX Scheduler — CAN Bridge Analyzer</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  .tx-table { width:100%; border-collapse:collapse; margin-top:1rem; }
+  .tx-table th,.tx-table td { padding:7px 10px; border:1px solid var(--border,#333); text-align:left; font-size:0.85rem; }
+  .tx-table th { background:var(--card,#222); }
+  .tx-on  { color:#2ecc71; font-weight:bold; }
+  .tx-off { color:#888; }
+  .form-row { display:flex; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.5rem; align-items:center; }
+  .form-row label { font-size:0.8rem; color:var(--text-dim,#aaa); min-width:70px; }
+  .form-row input { background:var(--input-bg,#2c3e50); border:1px solid var(--border,#555); color:var(--text,#eee); padding:4px 8px;
+                    border-radius:4px; font-size:0.85rem; width:120px; }
+  .form-row input[name=label] { width:200px; }
+  .form-row input[name=data]  { width:160px; font-family:monospace; }
+  .add-form { background:var(--card,#1a1a2a); border:1px solid var(--border,#333); border-radius:6px;              padding:1rem; margin:1rem 0; }
+  .counter-note { font-size:0.75rem; color:var(--text-dim,#888); margin-top:0.3rem; }
+  .warn { color:#e67e22; }
+</style>
+</head>
+<body>
+<div class="header-bar">
+  <div class="header-left">
+    <span class="tool-name">TX SCHEDULER</span>
+    <span class="bus-info">Periodic CAN transmitter</span>
+  </div>
+  <div class="header-right">
+    <button type="button" class="btn small secondary" id="theme-btn" onclick="toggleTheme()">&#9728; Theme</button>
+    <a href="/" class="btn small secondary" style="text-decoration:none">&#8592; Back</a>
+  </div>
+</div>
+
+<div style="max-width:960px;margin:56px auto 1.5rem;padding:0 1rem;">
+
+  <p style="color:var(--text-dim,#aaa);font-size:0.9rem">
+    Schedule periodic CAN frames on CAN0 or CAN1. Each entry fires at its own interval.
+    A <strong>counter byte</strong> auto-increments on every transmit — use this for rolling-counter
+    keepalives like the Leaf 0x50C. All entries persist across reboots (NVS).
+    <br><span class="warn">&#9888; Entries start disabled — enable them explicitly once wired correctly.</span>
+  </p>
+
+  <h2 style="color:#2ecc71;margin:1.5rem 0 0.5rem">Active Entries</h2>
+  <div id="tx-list">Loading...</div>
+
+  <h2 style="color:#2ecc71;margin:1.5rem 0 0.5rem">Add Entry</h2>
+  <div class="add-form">
+    <div class="form-row">
+      <label>CAN ID (hex)</label><input name="id" placeholder="e.g. 50C" maxlength="8">
+      <label>Bus</label>
+      <select name="bus" style="background:var(--input-bg,#2c3e50);border:1px solid var(--border,#555);color:var(--text,#eee);padding:4px 8px;border-radius:4px;font-size:0.85rem">
+        <option value="0">CAN0</option>
+        <option value="1">CAN1</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <label>Interval (ms)</label><input name="interval" placeholder="100" value="100" maxlength="6">
+      <label>Counter byte</label><input name="counter_byte" placeholder="-1 (off)" value="-1" maxlength="2">
+    </div>
+    <div class="form-row">
+      <label>Data (hex)</label><input name="data" placeholder="0000000000000000" value="0000000000000000" maxlength="16">
+    </div>
+    <div class="form-row">
+      <label>Label</label><input name="label" placeholder="My keepalive" maxlength="23">
+    </div>
+    <p class="counter-note">Counter byte: index 0–7 means that byte increments on each transmit. -1 = static payload.</p>
+    <button class="btn primary" onclick="addEntry()">Add Entry</button>
+    <span id="add-status" style="margin-left:1rem;font-size:0.85rem;color:#2ecc71"></span>
+  </div>
+
+</div>
+
+<script>
+function loadList() {
+  fetch('/api/tx/list')
+    .then(r => r.json())
+    .then(entries => {
+      if (!entries.length) {
+        document.getElementById('tx-list').innerHTML =
+          '<p style="color:#888">No entries yet. Add one below.</p>';
+        return;
+      }
+      let html = '<table class="tx-table"><thead><tr>' +
+        '<th>#</th><th>ID</th><th>Bus</th><th>Interval</th><th>Data</th>' +
+        '<th>Counter</th><th>Label</th><th>Status</th><th>Actions</th>' +
+        '</tr></thead><tbody>';
+      entries.forEach(e => {
+        const dataHex = e.data.map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+        const st = e.enabled
+          ? '<span class="tx-on">&#9654; Running</span>'
+          : '<span class="tx-off">&#9675; Off</span>';
+        html += `<tr>
+          <td>${e.idx}</td>
+          <td><code>${e.id}</code></td>
+          <td>CAN${e.bus}</td>
+          <td>${e.interval} ms</td>
+          <td><code style="font-size:0.78rem">${dataHex}</code></td>
+          <td>${e.counter_byte >= 0 ? 'byte ' + e.counter_byte : '&#x2014;'}</td>
+          <td>${e.label || '&mdash;'}</td>
+          <td>${st}</td>
+          <td>
+            <button class="btn small ${e.enabled ? '' : 'primary'}"
+              onclick="toggle(${e.idx},${e.enabled ? 0 : 1})">
+              ${e.enabled ? 'Disable' : 'Enable'}
+            </button>
+            <button class="btn small" style="background:#c0392b;border-color:#c0392b;margin-left:4px"
+              onclick="remove(${e.idx})">Del</button>
+          </td>
+        </tr>`;
+      });
+      html += '</tbody></table>';
+      document.getElementById('tx-list').innerHTML = html;
+    })
+    .catch(() => {
+      document.getElementById('tx-list').innerHTML =
+        '<p style="color:#e74c3c">Failed to load entries.</p>';
+    });
+}
+
+function toggle(idx, en) {
+  const fd = new FormData();
+  fd.append('idx', idx);
+  fd.append('enabled', en);
+  fetch('/api/tx/enable', {method:'POST', body:fd})
+    .then(r => r.json())
+    .then(d => { if(d.ok) loadList(); else alert('Error: ' + (d.error||'unknown')); });
+}
+
+function remove(idx) {
+  if (!confirm('Delete entry #' + idx + '?')) return;
+  const fd = new FormData();
+  fd.append('idx', idx);
+  fetch('/api/tx/remove', {method:'POST', body:fd})
+    .then(r => r.json())
+    .then(d => { if(d.ok) loadList(); else alert('Error: ' + (d.error||'unknown')); });
+}
+
+function addEntry() {
+  const f = (n) => document.querySelector(`.add-form [name=${n}]`);
+  const id  = f('id').value.trim().replace(/^0x/i, '');
+  if (!id) { alert('CAN ID is required'); return; }
+  const data = f('data').value.trim().replace(/\s+/g,'').padEnd(16,'0').substring(0,16);
+
+  const fd = new FormData();
+  fd.append('id',           id);
+  fd.append('bus',          f('bus').value);
+  fd.append('interval',     f('interval').value || '100');
+  fd.append('counter_byte', f('counter_byte').value || '-1');
+  fd.append('data',         data);
+  fd.append('label',        f('label').value.trim());
+
+  fetch('/api/tx/add', {method:'POST', body:fd})
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        document.getElementById('add-status').style.color = '#2ecc71'; document.getElementById('add-status').style.color = '#2ecc71'; document.getElementById('add-status').textContent = 'Added as entry #' + d.idx;
+        f('id').value = ''; f('label').value = '';
+        f('data').value = '0000000000000000';
+        loadList();
+      } else {
+        document.getElementById('add-status').style.color = '#e74c3c';
+        document.getElementById('add-status').textContent = 'Error: ' + (d.error || 'unknown');
+      }
+    });
+}
+
+loadList();
+(function(){
+  var t=localStorage.getItem('theme')||'light';
+  document.documentElement.dataset.theme=t;
+  document.body.dataset.theme=t;
+  var b=document.getElementById('theme-btn');
+  if(b)b.textContent=t==='light'?'\uD83C\uDF19 Theme':'\u2600 Theme';
+})();
+function toggleTheme(){
+  var d=document.body.dataset.theme!=='light';
+  var t=d?'light':'dark';
+  document.body.dataset.theme=t;
+  document.documentElement.dataset.theme=t;
+  localStorage.setItem('theme',t);
+  var b=document.getElementById('theme-btn');
+  if(b)b.textContent=d?'\uD83C\uDF19 Theme':'\u2600 Theme';
+}
+</script>
+</body>
+</html>)html";
+    return page;
+}
+
+// ---------------------------------------------------------------------------
+String CANWebServer::sanitize_dbc_filename(const String& raw) {
+    String safe = "";
+    for (unsigned int i = 0; i < raw.length(); i++) {
+        char c = raw[i];
+        if (isalnum(c) || c == '_' || c == '-' || c == '.') safe += c;
+    }
+    if (!safe.endsWith(".dbc")) {
+        int dot = safe.lastIndexOf('.');
+        if (dot >= 0) safe = safe.substring(0, dot);
+        safe += ".dbc";
+    }
+    if (safe.length() > 44) safe = safe.substring(0, 40) + ".dbc";
+    if (safe == ".dbc") safe = "upload.dbc";
+    return safe;
+}
+
+bool CANWebServer::is_in_dbc_list(const char* list, const char* fname) {
+    String l = String(list);
+    String f = String(fname);
+    int pos = 0;
+    while (pos <= (int)l.length()) {
+        int comma = l.indexOf(',', pos);
+        String token = (comma < 0) ? l.substring(pos) : l.substring(pos, comma);
+        token.trim();
+        if (token == f) return true;
+        if (comma < 0) break;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+void CANWebServer::add_to_dbc_list(char* list, size_t list_size, const char* fname) {
+    if (is_in_dbc_list(list, fname)) return;
+    String l = String(list);
+    if (l.length() > 0) l += ",";
+    l += fname;
+    if (l.length() >= list_size) return;
+    strncpy(list, l.c_str(), list_size - 1);
+    list[list_size - 1] = '\0';
+}
+
+void CANWebServer::remove_from_dbc_list(char* list, const char* fname) {
+    String l = String(list);
+    String f = String(fname);
+    String result = "";
+    int pos = 0;
+    bool first = true;
+    while (pos <= (int)l.length()) {
+        int comma = l.indexOf(',', pos);
+        String token = (comma < 0) ? l.substring(pos) : l.substring(pos, comma);
+        token.trim();
+        if (token.length() > 0 && token != f) {
+            if (!first) result += ",";
+            result += token;
+            first = false;
+        }
+        if (comma < 0) break;
+        pos = comma + 1;
+    }
+    strncpy(list, result.c_str(), 127);
+    list[127] = '\0';
+}
+
+void CANWebServer::reload_dbc_parser() {
+    dbc_parser.clear();
+    if (g_cfg.active_dbcs[0] == '\0') return;
+    String list = String(g_cfg.active_dbcs);
+    int pos = 0;
+    bool first_loaded = false;
+    while (pos <= (int)list.length()) {
+        int comma = list.indexOf(',', pos);
+        String fname = (comma < 0) ? list.substring(pos) : list.substring(pos, comma);
+        fname.trim();
+        if (fname.length() > 0) {
+            String path = "/" + fname;
+            if (!first_loaded) {
+                if (dbc_parser.load_from_spiffs(path.c_str())) first_loaded = true;
+            } else {
+                dbc_parser.load_additive_from_spiffs(path.c_str());
+            }
+        }
+        if (comma < 0) break;
+        pos = comma + 1;
+    }
+}
+
+/* Escape a String for safe JSON string value inclusion. */
+static String json_escape(const String& in) {
+    String out;
+    out.reserve(in.length() + 8);
+    for (size_t i = 0; i < in.length(); i++) {
+        const char c = in[i];
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if ((uint8_t)c < 0x20) {
+                    char buf[7];
+                    snprintf(buf, sizeof(buf), "\\u%04X", (unsigned)c & 0xFF);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+                break;
+        }
+    }
+    return out;
+}
+
+String CANWebServer::get_dbc_file_list_json() {
+    if (reload_dbc_pending) {
+        reload_dbc_pending = false;
+        reload_dbc_parser();
+    }
+
+    if (!spiffs_mounted) {
+        return "{\"files\":[],\"active_dbcs\":\"\",\"total_messages\":0,\"total_signals\":0,\"sig_cap\":" +
+               String(DBC_MAX_SIGNALS) +
+               ",\"sig_pct\":0,\"capped\":false,\"max_active\":4,\"heap_free\":" +
+               String((unsigned)ESP.getFreeHeap()) +
+               ",\"spiffs_total\":0,\"spiffs_used\":0}";
+    }
+
+    String json = "{\"files\":[";
+    bool first = true;
+
+    File root = SPIFFS.open("/");
+    if (root && root.isDirectory()) {
+        File f = root.openNextFile();
+        while (f) {
+            String name = String(f.name());
+            if (name.startsWith("/")) name = name.substring(1);
+            if (name.endsWith(".dbc")) {
+                if (!first) json += ",";
+                first = false;
+                bool active = is_in_dbc_list(g_cfg.active_dbcs, name.c_str());
+                json += "{\"name\":\"" + json_escape(name) + "\""
+                        ",\"size\":"   + String(f.size()) +
+                        ",\"active\":" + (active ? "true" : "false") + "}";
+            }
+            f = root.openNextFile();
+        }
+    }
+
+    json += "],\"active_dbcs\":\"";
+    json += json_escape(g_cfg.active_dbcs[0] ? g_cfg.active_dbcs : "");
+    json += "\""
+            ",\"total_messages\":" + String((unsigned)dbc_parser.message_count()) +
+            ",\"total_signals\":"  + String((unsigned)dbc_parser.signal_count())  +
+            ",\"sig_cap\":"        + String(DBC_MAX_SIGNALS)                       +
+            ",\"sig_pct\":"        + String(dbc_parser.signal_count() * 100 / (DBC_MAX_SIGNALS > 0 ? DBC_MAX_SIGNALS : 1)) +
+            ",\"capped\":"         + String(dbc_parser.signal_count() >= DBC_MAX_SIGNALS ? "true" : "false") +
+            ",\"max_active\":4"    +
+            ",\"heap_free\":"      + String((unsigned)ESP.getFreeHeap())            +
+            ",\"spiffs_total\":"   + String((unsigned)SPIFFS.totalBytes())         +
+            ",\"spiffs_used\":"    + String((unsigned)SPIFFS.usedBytes())          + "}";
+    return json;
+}
+
+String CANWebServer::generateDBCPage() {
+    return R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DBC Files — CAN Bridge Analyzer</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  .dbc-table{width:100%;border-collapse:collapse;margin-top:1rem;}
+  .dbc-table th,.dbc-table td{padding:8px 12px;border:1px solid var(--border,#333);text-align:left;font-family:monospace;}
+  .dbc-table th{background:var(--card,#222);}
+  .upload-box{border:2px dashed var(--border,#555);padding:1.5rem;text-align:center;margin:1rem 0;border-radius:6px;cursor:pointer;}
+  .upload-box:hover,.drag-over{border-color:#2ecc71 !important;}
+  .preload-box{background:var(--card,#1a1a1a);border:1px solid var(--border,#444);border-radius:6px;padding:1rem;margin:.75rem 0;font-size:.85rem;}
+  .preload-box code{color:#f39c12;}
+  .status-msg{margin-top:.5rem;font-size:.9rem;}
+  .ok{color:#2ecc71;} .err{color:#e74c3c;} .info{color:#3498db;}
+  label.dbc-label{cursor:pointer;user-select:none;}
+  input[type=checkbox]{cursor:pointer;accent-color:#2ecc71;width:16px;height:16px;vertical-align:middle;margin-right:4px;}
+</style>
+</head>
+<body>
+<div class="header-bar">
+  <div class="header-left">
+    <span class="tool-name">DBC FILES</span>
+    <span class="bus-info" id="active-summary">Loading...</span>
+  </div>
+  <div class="header-right">
+    <button type="button" class="btn small secondary" id="theme-btn" onclick="toggleTheme()">&#9728; Theme</button>
+    <a href="/" class="btn small secondary" style="text-decoration:none">&#8592; Back</a>
+  </div>
+</div>
+
+<div style="max-width:860px;margin:56px auto 1.5rem;padding:0 1rem;">
+
+  <h2 style="color:#2ecc71;margin-bottom:.5rem">Preloading at Build Time</h2>
+  <div class="preload-box">
+    <p style="margin:0 0 .4rem;color:var(--text,#ecf0f1)">Drop <code>.dbc</code> files into <code>data/</code> in the project root, then run once:</p>
+    <code>pio run --target uploadfs</code>
+    <p style="margin:.4rem 0 0;color:var(--text,#ecf0f1)">Files in <code>data/</code> are baked into SPIFFS. After that, use the upload below for any updates &mdash; no reflash needed.</p>
+  </div>
+
+  <h2 style="color:#2ecc71;margin:1.5rem 0 .5rem">Upload Over WiFi</h2>
+  <div class="upload-box" id="drop-zone">
+    <form id="upload-form" enctype="multipart/form-data">
+      <input type="file" id="dbc-file" name="file" accept=".dbc" style="display:none">
+      <button type="button" class="btn primary" onclick="document.getElementById('dbc-file').click()">Choose .dbc file</button>
+      &nbsp;
+      <button type="button" class="btn primary" id="upload-btn" onclick="uploadFile()" disabled>Upload</button>
+    </form>
+    <div id="upload-status" class="status-msg"></div>
+  </div>
+
+  <h2 style="color:#2ecc71;margin:1.5rem 0 .25rem">Installed Files</h2>
+    <p style="color:var(--text,#ecf0f1);font-size:.85rem;margin:.25rem 0 .75rem">
+    Tick a file to include it in the active signal database.
+    Multiple files can be active simultaneously &mdash; signals are merged by CAN ID.
+    Max 4 files active at once. The selection survives a reboot.
+  </p>
+  <div id="cap-warning" style="display:none;background:#7d3c00;border:1px solid #e67e22;border-radius:5px;padding:.5rem .75rem;margin-bottom:.75rem;font-size:.85rem;color:#f5cba7">
+    &#9888; Signal cap reached (≈768) — some signals from large files were not loaded.
+    Deselect a file to free capacity.
+  </div>
+  <div id="file-list-container">Loading...</div>
+
+</div>
+
+<script>
+var _lastData = {};
+
+function parseJsonResponse(url, response) {
+    return response.text().then(function(body) {
+        if (!response.ok) {
+            throw new Error('HTTP ' + response.status + (body ? (': ' + body.substring(0, 180)) : ''));
+        }
+        try {
+            return body ? JSON.parse(body) : {};
+        } catch (e) {
+            throw new Error('Invalid JSON from ' + url);
+        }
+    });
+}
+
+function updateHeader(data) {
+  _lastData = data;
+  var el = document.getElementById('active-summary');
+  if (!data.active_dbcs || data.active_dbcs === '') {
+    el.textContent = 'No DBC active';
+  } else {
+    var sig = data.total_signals || 0;
+    var cap = data.sig_cap || 768;
+    var pctSig = Math.round(sig * 100 / cap);
+    var capColor = pctSig >= 100 ? '#e74c3c' : pctSig >= 75 ? '#e67e22' : '#2ecc71';
+    el.innerHTML = data.active_dbcs +
+      ' &mdash; <span style="color:' + capColor + '">' +
+      sig + '\u202F/\u202F' + cap + ' signals (' + pctSig + '%)</span>';
+  }
+  var warn = document.getElementById('cap-warning');
+  if (warn) warn.style.display = data.capped ? 'block' : 'none';
+}
+
+function loadFileList() {
+    fetch('/api/dbc/list')
+        .then(function(r) {
+            if (!r.ok) {
+                return r.text().then(function(t) {
+                    throw new Error('HTTP ' + r.status + (t ? (': ' + t.substring(0, 180)) : ''));
+                });
+            }
+            return r.text();
+        })
+        .then(function(body) {
+        var data;
+        try {
+            data = JSON.parse(body);
+        } catch (e) {
+            throw new Error('Invalid JSON from /api/dbc/list');
+        }
+        if (!data || typeof data !== 'object') data = {};
+        if (!Array.isArray(data.files)) data.files = [];
+        if (typeof data.active_dbcs !== 'string') data.active_dbcs = '';
+        if (typeof data.max_active !== 'number') data.max_active = 4;
+        if (typeof data.sig_cap !== 'number') data.sig_cap = 768;
+        if (typeof data.total_signals !== 'number') data.total_signals = 0;
+        if (typeof data.spiffs_total !== 'number') data.spiffs_total = 0;
+        if (typeof data.spiffs_used !== 'number') data.spiffs_used = 0;
+        if (typeof data.heap_free !== 'number') data.heap_free = 0;
+
+    updateHeader(data);
+    var spiffsPct = data.spiffs_total > 0 ? Math.round(data.spiffs_used*100/data.spiffs_total) : 0;
+    var heapKB = Math.round((data.heap_free||0)/1024);
+    var heapColor = heapKB < 30 ? '#e74c3c' : heapKB < 60 ? '#e67e22' : '#888';
+    var html = '<p style="color:var(--text,#ecf0f1);font-size:.82rem;margin:.25rem 0">' +
+      'SPIFFS: ' + Math.round(data.spiffs_used/1024) + '\u202FKB / ' +
+      Math.round(data.spiffs_total/1024) + '\u202FKB (' + spiffsPct + '% used)' +
+      ' &nbsp;&bull;&nbsp; <span style="color:' + heapColor + '">Heap free: ' + heapKB + '\u202FKB</span>' +
+      '</p>';
+
+    var activeCount = (data.active_dbcs && data.active_dbcs !== '')
+      ? (data.active_dbcs.split(',').length) : 0;
+    var atFileCap = activeCount >= (data.max_active || 4);
+    var atSigCap  = data.capped;
+
+    if (!data.files || data.files.length === 0) {
+    html += '<p style="color:var(--text,#ecf0f1)">No DBC files installed. Upload one above or add to <code>data/</code> and run <code>uploadfs</code>.</p>';
+    } else {
+      html += '<table class="dbc-table"><thead><tr>' +
+              '<th>Active</th><th>File</th><th>Size</th><th></th>' +
+              '</tr></thead><tbody>';
+      data.files.forEach(function(f) {
+        var id = 'chk-' + f.name.replace(/\./g,'_');
+        var sizeKB = Math.round(f.size / 1024);
+        var sizeBadge = sizeKB > 200
+          ? ' <span title="Large file \u2014 may use significant signal budget" style="color:#e67e22;cursor:help">&#9888;</span>'
+          : '';
+        var wouldEnable = !f.active;
+        var disableChk = wouldEnable && (atFileCap || atSigCap);
+        var disableTitle = disableChk
+          ? (atFileCap ? 'Max 4 files active \u2014 deselect one first'
+                       : 'Signal cap reached \u2014 deselect a file to free capacity')
+          : '';
+        html += '<tr>' +
+          '<td style="text-align:center">' +
+            '<input type="checkbox" id="' + id + '"' + (f.active?' checked':'') +
+            (disableChk ? ' disabled title="' + disableTitle + '"' : '') +
+            ' onchange="toggleDBC(\'' + f.name + '\',this.checked)">' +
+          '</td>' +
+          '<td><label for="' + id + '" class="dbc-label">' + f.name + '</label></td>' +
+          '<td style="white-space:nowrap">' + sizeKB + '\u202FKB' + sizeBadge + '</td>' +
+          '<td><button class="btn small" style="background:#c0392b;border-color:#c0392b" ' +
+               'onclick="deleteDBC(\'' + f.name + '\')"' +
+               (f.active ? ' title="Deselect before deleting"' : '') +
+               '>Delete</button></td>' +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+      if (atFileCap) {
+        html += '<p style="color:#e67e22;font-size:.82rem;margin:.5rem 0">&#9888; ' +
+          activeCount + ' of ' + (data.max_active||4) + ' max files active.</p>';
+      }
+    }
+        document.getElementById('file-list-container').innerHTML = html;
+    }).catch(function(err) {
+    document.getElementById('file-list-container').innerHTML =
+            '<p class="err">Failed to load file list: ' + ((err && err.message) ? err.message : 'unknown error') + '</p>';
+  });
+}
+
+function toggleDBC(fname, enable) {
+  var fd = new FormData();
+  fd.append('file', fname);
+  fd.append('enable', enable ? '1' : '0');
+
+    var status = document.getElementById('upload-status');
+    if (status) status.innerHTML = '<span class="info">Applying selection...</span>';
+
+  fetch('/api/dbc/select', {method:'POST', body:fd})
+        .then(function(r) { return parseJsonResponse('/api/dbc/select', r); })
+    .then(function(data) {
+      if (data.ok) {
+                if (status) status.innerHTML = '<span class="ok">Selection updated.</span>';
+        setTimeout(loadFileList, 500);
+      } else {
+        var container = document.getElementById('file-list-container');
+        var errDiv = document.createElement('p');
+        errDiv.className = 'err';
+        errDiv.style.margin = '.5rem 0';
+        errDiv.textContent = '\u26A0 ' + (data.error || 'Unknown error');
+        container.insertAdjacentElement('beforebegin', errDiv);
+        setTimeout(function(){ if(errDiv.parentNode) errDiv.parentNode.removeChild(errDiv); }, 5000);
+                if (status) status.innerHTML = '<span class="err">' + (data.error || 'Selection failed') + '</span>';
+        loadFileList();
+      }
+    })
+        .catch(function() {
+            if (status) status.innerHTML = '<span class="info">Selection request interrupted, refreshing...</span>';
+            setTimeout(loadFileList, 700);
+        });
+}
+
+document.getElementById('dbc-file').addEventListener('change', function() {
+  document.getElementById('upload-btn').disabled = (this.files.length === 0);
+  if (this.files.length) {
+    var f = this.files[0];
+    var sz = Math.round(f.size/1024);
+    var warn = f.size > 150*1024
+      ? ' <span style="color:#e67e22">&#9888; Large file \u2014 may approach signal cap</span>' : '';
+    document.getElementById('upload-status').innerHTML =
+      '<span class="info">Selected: ' + f.name + ' (' + sz + ' KB)</span>' + warn;
+  }
+});
+
+function uploadFile() {
+  var fi = document.getElementById('dbc-file');
+  if (!fi.files.length) return;
+  var file = fi.files[0], st = document.getElementById('upload-status');
+  if (!file.name.toLowerCase().endsWith('.dbc')) {
+    st.innerHTML = '<span class="err">Only .dbc files are accepted</span>'; return;
+  }
+  if (file.size === 0) {
+    st.innerHTML = '<span class="err">File is empty</span>'; return;
+  }
+  if (file.size > 512*1024) {
+    st.innerHTML = '<span class="err">Max 512 KB per file</span>'; return;
+  }
+  var fd = new FormData();
+  fd.append('file', file, file.name);
+  st.innerHTML = '<span class="info">Uploading ' + Math.round(file.size/1024) + ' KB...</span>';
+  document.getElementById('upload-btn').disabled = true;
+  fetch('/api/dbc/upload', {method:'POST', body:fd})
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      st.innerHTML = data.ok
+        ? '<span class="ok">\u2714 Upload complete!</span>'
+        : '<span class="err">\u26A0 ' + (data.error || 'Upload failed') + '</span>';
+      if (data.ok) loadFileList();
+      document.getElementById('upload-btn').disabled = false;
+    })
+    .catch(function() {
+      st.innerHTML = '<span class="err">Network error \u2014 upload may have been interrupted.</span>';
+      document.getElementById('upload-btn').disabled = false;
+    });
+}
+
+function deleteDBC(fname) {
+  if (!confirm('Delete ' + fname + '? This cannot be undone.')) return;
+  var fd = new FormData();
+  fd.append('file', fname);
+  fetch('/api/dbc/delete', {method:'POST', body:fd})
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.ok) loadFileList();
+      else alert('Error: ' + (data.error||'unknown'));
+    })
+    .catch(function() { alert('Network error.'); });
+}
+
+var dz = document.getElementById('drop-zone');
+dz.addEventListener('dragover',  function(e){e.preventDefault();dz.classList.add('drag-over');});
+dz.addEventListener('dragleave', function()  {dz.classList.remove('drag-over');});
+dz.addEventListener('drop', function(e) {
+  e.preventDefault(); dz.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) {
+    document.getElementById('dbc-file').files = e.dataTransfer.files;
+    document.getElementById('upload-btn').disabled = false;
+    document.getElementById('upload-status').innerHTML =
+      '<span class="info">Selected: ' + e.dataTransfer.files[0].name + '</span>';
+  }
+});
+
+loadFileList();
+(function(){
+  var t=localStorage.getItem('theme')||'light';
+  document.documentElement.dataset.theme=t;
+  document.body.dataset.theme=t;
+  var b=document.getElementById('theme-btn');
+  if(b)b.textContent=t==='light'?'\uD83C\uDF19 Theme':'\u2600 Theme';
+})();
+function toggleTheme(){
+  var d=document.body.dataset.theme!=='light';
+  var t=d?'light':'dark';
+  document.body.dataset.theme=t;
+  document.documentElement.dataset.theme=t;
+  localStorage.setItem('theme',t);
+  var b=document.getElementById('theme-btn');
+  if(b)b.textContent=d?'\uD83C\uDF19 Theme':'\u2600 Theme';
+}
+</script>
+</body>
+</html>)html";
+}
+
+
