@@ -102,7 +102,7 @@ The `rev2gvret.py` script (included) can convert raw serial captures to GVRET fo
 
 ## Nissan Leaf CAN IDs
 
-`src/can_ids.h` contains commented CAN ID definitions for the Nissan Leaf ZE0/AZE0 BMS (2011–2017) as a reference example for decoding real-world CAN traffic.
+are pre loaded in SPIFFS
 
 ---
 
