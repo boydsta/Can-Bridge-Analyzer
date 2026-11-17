@@ -1274,6 +1274,17 @@ body {
     border-left-color: #7f8c8d !important; /* grey — update timeout exceeded */
 }
 
+/* Novel-event highlight — a signal that doesn't normally change but just did,
+   or a brand-new CAN ID.  Persists for 15 s, overrides green/blue/grey. */
+.message-item.novel-event {
+    border-left-color: #f39c12 !important; /* amber */
+    animation: novel-flash 1.5s ease-out;
+}
+@keyframes novel-flash {
+    0%   { background: rgba(243, 156, 18, 0.30); }
+    100% { background: transparent; }
+}
+
 @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.7; }
@@ -2099,6 +2110,33 @@ class CANAnalyzer {
                     this.addActivity('New message: ' + idInfo.i);
                 }
 
+                /* --- Novelty / event detection ---
+                   Maintain a rolling window of the last 30 WebSocket samples (≈3 s at 100 ms
+                   push rate) that records whether the payload changed on each sample.
+                   churn_rate = fraction of samples where payload changed.
+                   Signals with churn_rate > 0.2 (changing faster than every ~500 ms) are
+                   classified as "high churn" and will NOT be flagged as novel events.
+                   A low-churn signal that suddenly changes → novel_ts stamped → amber highlight
+                   for 15 s.  Brand-new IDs are always stamped novel. */
+                const NOVEL_WINDOW   = 30;   /* samples (~3 s) */
+                const NOVEL_CHURN_TH = 0.20; /* >20 % change rate → high-churn, skip */
+                const NOVEL_DECAY_MS = 15000;/* ms the amber highlight persists */
+
+                const churnWindow = existing ? (existing.churn_window || []) : [];
+                churnWindow.push(payloadChanged ? 1 : 0);
+                if (churnWindow.length > NOVEL_WINDOW) churnWindow.shift();
+                const churnRate = churnWindow.length > 0
+                    ? churnWindow.reduce((s, v) => s + v, 0) / churnWindow.length
+                    : 0;
+
+                let novelTs = existing ? (existing.novel_ts || 0) : 0;
+                if (isNew && idInfo.p) {
+                    novelTs = now;  /* brand-new CAN ID always interesting */
+                } else if (payloadChanged && churnRate < NOVEL_CHURN_TH) {
+                    novelTs = now;  /* sudden change on a normally-stable signal */
+                }
+                /* --- end novelty detection --- */
+
                 // Create message object with compressed field names
                 const canMsg = {
                     id: idInfo.i,
@@ -2119,7 +2157,10 @@ class CANAnalyzer {
                     /* Keep a per-ID "last changed" timestamp to avoid flicker between summary samples. */
                     prev_payload_hex: existing ? existing.payload_hex : '',
                     last_change_timestamp: lastChangeTs,
-                    is_changing: (lastChangeTs > 0) ? ((now - lastChangeTs) < 3000) : false
+                    is_changing: (lastChangeTs > 0) ? ((now - lastChangeTs) < 3000) : false,
+                    churn_window: churnWindow,
+                    churn_rate: churnRate,
+                    novel_ts: novelTs
                 };
 
                 if (canMsg.period > 0) {
@@ -2256,6 +2297,13 @@ class CANAnalyzer {
             } else {
                 classes.push('active-static');
             }
+
+            /* Novel-event highlight: amber border for 15 s when a normally-stable
+               signal suddenly changes, or when a brand-new ID is first seen.
+               Applied after active-changing/active-static so it overrides via CSS
+               specificity (novel-event rule uses !important). */
+            const isNovel = (Date.now() - (msg.novel_ts || 0)) < 15000;
+            if (isNovel) classes.push('novel-event');
 
             const periodText = msg.periodMs ? msg.periodMs + 'ms' : (msg.period ? Math.round(msg.period) + 'Hz' : 'Static');
 
