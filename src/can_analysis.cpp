@@ -19,7 +19,7 @@ void CANAnalysis::begin() {
     if (g_serial_logging && g_serial_mode == 0) { Serial.println("CAN Analysis Engine initialized"); }
 }
 
-void CANAnalysis::processMessage(const CANFDMessage& frame, uint8_t bus_id) {
+void CANAnalysis::processMessage(const CANFrame& frame, uint8_t bus_id) {
     total_messages++;
     uint32_t current_time = millis();
 
@@ -71,7 +71,7 @@ uint32_t CANAnalysis::captureSnapshot(const String& description) {
         uint32_t can_id = pair.first;
         const CANIDStats& stats = pair.second;
 
-        CANFDMessage msg;
+        CANFrame msg;
         msg.id = can_id;
         msg.len = 8; // Assume 8 bytes for now
         msg.ext = false;
@@ -107,11 +107,11 @@ std::vector<uint32_t> CANAnalysis::compareSnapshots(uint32_t snapshot1_id, uint3
     // Find CAN IDs that exist in both snapshots but have different data
     for (const auto& pair : snap1.messages) {
         uint32_t can_id = pair.first;
-        const CANFDMessage& msg1 = pair.second;
+        const CANFrame& msg1 = pair.second;
 
         auto it = snap2.messages.find(can_id);
         if (it != snap2.messages.end()) {
-            const CANFDMessage& msg2 = it->second;
+            const CANFrame& msg2 = it->second;
 
             // Compare payload data
             uint8_t len1 = (msg1.len < 8) ? msg1.len : 8;
@@ -175,7 +175,7 @@ bool CANAnalysis::shouldBlock(uint32_t can_id) {
     return false; // Default: don't block
 }
 
-bool CANAnalysis::shouldModify(CANFDMessage& frame) {
+bool CANAnalysis::shouldModify(CANFrame& frame) {
     auto it = filter_rules.find(frame.id);
     if (it != filter_rules.end() && it->second.active && it->second.modify) {
         const FilterRule& rule = it->second;

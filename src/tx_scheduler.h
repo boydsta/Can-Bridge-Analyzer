@@ -14,7 +14,7 @@
 #define TX_SCHEDULER_H
 
 #include <Arduino.h>
-#include <ACAN2517FD.h>
+#include "can_device.h"
 #include <Preferences.h>
 #include <vector>
 
@@ -54,7 +54,7 @@ public:
      * @param can0  Pointer to CAN0 controller (may be nullptr).
      * @param can1  Pointer to CAN1 controller (may be nullptr).
      */
-    void begin(ACAN2517FD* can0, ACAN2517FD* can1);
+    void begin(CANController* can0, CANController* can1);
 
     /**
      * @brief Add or update an entry.
@@ -87,7 +87,7 @@ public:
     void load();
 
 private:
-    ACAN2517FD* can[2];                ///< CAN controllers indexed by bus
+    CANController* can[2];             ///< CAN controllers indexed by bus
     TxEntry     entries[TX_SCHED_MAX_ENTRIES];
     uint8_t     entry_count;
     SemaphoreHandle_t mutex;

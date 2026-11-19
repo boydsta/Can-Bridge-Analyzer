@@ -753,7 +753,7 @@ void CANWebServer::processCommand(AsyncWebSocketClient *client, const String& co
 
             // Create CAN frame and forward it
             if (can_bridge) {
-                CANFDMessage frame;
+                CANFrame frame;
                 frame.id = can_id;
                 frame.len = payload_len;
                 for (int i = 0; i < payload_len; i++) {

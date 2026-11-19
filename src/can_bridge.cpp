@@ -9,9 +9,16 @@
  * @param can  Pointer to ACAN2517FD instance.
  * @param name Label for this controller.
  */
-void print_can_diagnostics(ACAN2517FD* can, const char* name) {
+void print_can_diagnostics(CANController* can, const char* name) {
   if (!can) return;
 
+#if CAN_CHIP == MCP2515
+  if (g_serial_logging && g_serial_mode == 0) {
+    Serial.printf("  TX errors: %u, RX errors: %u\n",
+                  can->errorCountTX(), can->errorCountRX());
+    Serial.println("========================");
+  }
+#else
   uint32_t counters = can->errorCounters();
   uint8_t tx_err = (counters >> 8) & 0xFF;
   uint8_t rx_err = counters & 0xFF;
@@ -27,9 +34,10 @@ void print_can_diagnostics(ACAN2517FD* can, const char* name) {
     Serial.printf("  TX buffer size: %lu\n", can->driverTransmitBufferSize());
     Serial.println("========================");
   }
+#endif
 }
 
-CANBridge::CANBridge(ACAN2517FD* rx_can, ACAN2517FD* tx_can)
+CANBridge::CANBridge(CANController* rx_can, CANController* tx_can)
     : can_rx(rx_can), can_tx(tx_can), last_update(0),
       message_count(0), forwarded_count(0), blocked_count(0) {
 }
@@ -43,7 +51,7 @@ void CANBridge::begin() {
     }
 }
 
-void CANBridge::onMessageReceived(const CANFDMessage& frame, uint8_t bus_id) {
+void CANBridge::onMessageReceived(const CANFrame& frame, uint8_t bus_id) {
     message_count++;
 
     analysis.processMessage(frame, bus_id);
@@ -53,23 +61,23 @@ void CANBridge::onMessageReceived(const CANFDMessage& frame, uint8_t bus_id) {
 
         if (can_rx != nullptr && can_tx != nullptr) {
             if (bus_id == 0) {
-                forwarded = can_tx->tryToSend(frame);
+                forwarded = can_controller_send(*can_tx, frame);
                 if (!forwarded) {
                   /* Recover both controllers on TX fail — either may be in
                      Restricted Operation Mode (bus-off). Without recovery the
                      TX FIFO stays blocked until the ESP32 is reset. */
-                  can_rx->recoverFromRestrictedOperationMode();
-                  can_tx->recoverFromRestrictedOperationMode();
+                  can_controller_recover(*can_rx);
+                  can_controller_recover(*can_tx);
                   if (g_serial_logging && g_serial_mode == 0) {
                     Serial.printf("Failed to send from CAN0\n");
                     print_can_diagnostics(can_tx, "CAN0");
                   }
                 }
             } else if (bus_id == 1) {
-                forwarded = can_rx->tryToSend(frame);
+                forwarded = can_controller_send(*can_rx, frame);
                 if (!forwarded) {
-                  can_rx->recoverFromRestrictedOperationMode();
-                  can_tx->recoverFromRestrictedOperationMode();
+                  can_controller_recover(*can_rx);
+                  can_controller_recover(*can_tx);
                   if (g_serial_logging && g_serial_mode == 0) {
                     Serial.printf("Failed to send from CAN1\n");
                     print_can_diagnostics(can_rx, "CAN1");
@@ -89,29 +97,29 @@ void CANBridge::onMessageReceived(const CANFDMessage& frame, uint8_t bus_id) {
     }
 }
 
-bool CANBridge::shouldForward(const CANFDMessage& frame) {
+bool CANBridge::shouldForward(const CANFrame& frame) {
   if (is_can_id_blocked(frame.id)) {
     return false;
   }
   return !analysis.shouldBlock(frame.id);
 }
 
-bool CANBridge::forwardMessage(const CANFDMessage& frame) {
+bool CANBridge::forwardMessage(const CANFrame& frame) {
     if (can_tx == nullptr) {
         return false;
     }
-    bool result = can_tx->tryToSend(frame);
+    bool result = can_controller_send(*can_tx, frame);
     if (!result) {
         if (g_serial_logging && g_serial_mode == 0) { Serial.printf("Failed to forward CAN ID: 0x%03X\n", frame.id); }
     }
     return result;
 }
 
-int CANBridge::sendUsingExistingCode(const CANFDMessage& frame) {
+int CANBridge::sendUsingExistingCode(const CANFrame& frame) {
     if (can_tx == nullptr) {
         return 1;
     }
-    bool res = can_tx->tryToSend(frame);
+    bool res = can_controller_send(*can_tx, frame);
     return res ? 0 : 2;
 }
 

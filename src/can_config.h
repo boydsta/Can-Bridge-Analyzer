@@ -7,6 +7,19 @@
 #ifndef CAN_CONFIG_H
 #define CAN_CONFIG_H
 
+#ifndef MCP2515
+#define MCP2515 1
+#endif
+#ifndef MCP251863
+#define MCP251863 2
+#endif
+#ifndef CAN_CHIP
+#define CAN_CHIP MCP251863
+#endif
+#if CAN_CHIP != MCP2515 && CAN_CHIP != MCP251863
+#error "CAN_CHIP must be MCP2515 or MCP251863"
+#endif
+
 /** @brief Runtime serial logging mode flag. */
 extern volatile bool g_serial_logging;
 /** @brief Serial output mode: 0=Diagnostics, 1=CSV, 2=Binary GVRET. */
@@ -28,6 +41,14 @@ struct BusPreset {
   bool        is_fd;      ///< true = CAN FD mode, false = Classic CAN 2.0B
 };
 
+#if CAN_CHIP == MCP2515
+static const BusPreset k_bus_presets[] = {
+  { "125 kbps  —  CAN 2.0",    125000,  1, false },
+  { "250 kbps  —  CAN 2.0",    250000,  1, false },
+  { "500 kbps  —  CAN 2.0",    500000,  1, false },
+  { "1 Mbps    —  CAN 2.0",   1000000,  1, false },
+};
+#else
 static const BusPreset k_bus_presets[] = {
   { "125 kbps  —  CAN 2.0",    125000,  1, false },
   { "250 kbps  —  CAN 2.0",    250000,  1, false },
@@ -38,6 +59,7 @@ static const BusPreset k_bus_presets[] = {
   { "1M / 4M    —  CAN FD",   1000000,  4, true  },
   { "1M / 8M    —  CAN FD",   1000000,  8, true  },
 };
+#endif
 static const uint8_t k_num_presets = (uint8_t)(sizeof(k_bus_presets) / sizeof(k_bus_presets[0]));
 static const uint8_t k_default_preset = 2;  // 500 kbps CAN 2.0
 

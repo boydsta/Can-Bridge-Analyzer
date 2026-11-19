@@ -7,7 +7,7 @@
 #define CAN_ANALYSIS_H
 
 #include <Arduino.h>
-#include <ACAN2517FD.h>
+#include "can_device.h"
 #include <map>
 #include <vector>
 #include "can_config.h"
@@ -54,7 +54,7 @@ struct CANIDStats {
 struct CANSnapshot {
     uint32_t timestamp;                                 ///< Capture timestamp
     String description;                                 ///< User description
-    std::map<uint32_t, CANFDMessage> messages;         ///< Messages by ID
+    std::map<uint32_t, CANFrame> messages;             ///< Messages by ID
     std::map<uint32_t, CANIDStats> stats;              ///< Statistics by ID
 };
 
@@ -86,7 +86,7 @@ public:
      * @param frame CAN message to analyze
      * @param bus_id Bus ID (0 or 1)
      */
-    void processMessage(const CANFDMessage& frame, uint8_t bus_id);
+    void processMessage(const CANFrame& frame, uint8_t bus_id);
     
     /**
      * @brief Capture snapshot of current traffic
@@ -140,7 +140,7 @@ public:
      * @param frame CAN message (may be modified)
      * @return true if message was modified
      */
-    bool shouldModify(CANFDMessage& frame);
+    bool shouldModify(CANFrame& frame);
     
     /**
      * @brief Get JSON data for web interface

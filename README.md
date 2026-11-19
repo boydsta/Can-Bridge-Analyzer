@@ -111,10 +111,17 @@ are pre loaded in SPIFFS
 Requires [PlatformIO](https://platformio.org/). Dependencies are fetched automatically on first build.
 
 ```bash
-pio run          # build
-pio run -t upload  # build and flash
+pio run -e can-bridge-analyzer-mcp251863 # MCP251863 CAN-FD hardware
+pio run -e can-bridge-analyzer-mcp2515  # classic CAN MCP2515 hardware
+pio run -e can-bridge-analyzer-mcp251863 -t upload
 pio device monitor  # open serial monitor
 ```
+
+The `can-bridge-analyzer-mcp2515` environment selects the standard-CAN driver
+used by the REV controller in `spud-internal`. It supports CAN 2.0 only and
+uses the REV controller's 8 MHz MCP2515 oscillator setting.
+The `can-bridge-analyzer-mcp251863` environment selects the MCP251863 CAN-FD
+driver and retains runtime CAN-FD presets.
 
 ---
 

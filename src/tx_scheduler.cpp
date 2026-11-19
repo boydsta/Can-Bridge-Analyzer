@@ -23,7 +23,7 @@ TxScheduler::TxScheduler()
 // begin() — init mutex, load NVS, start task
 // ---------------------------------------------------------------------------
 
-void TxScheduler::begin(ACAN2517FD* can0, ACAN2517FD* can1) {
+void TxScheduler::begin(CANController* can0, CANController* can1) {
     can[0] = can0;
     can[1] = can1;
 
@@ -58,7 +58,7 @@ void TxScheduler::run() {
                 TxEntry& e = entries[i];
                 if (!e.enabled || e.interval_ms == 0) continue;
 
-                ACAN2517FD* ctrl = can[e.bus < 2 ? e.bus : 0];
+                CANController* ctrl = can[e.bus < 2 ? e.bus : 0];
                 if (!ctrl) continue;
 
                 if ((now - last_fire[i]) >= (unsigned long)e.interval_ms) {
@@ -69,18 +69,17 @@ void TxScheduler::run() {
                         e.data[e.counter_byte]++;
                     }
 
-                    CANFDMessage frame;
+                    CANFrame frame;
                     frame.id     = e.can_id;
                     frame.len    = 8;
                     frame.ext    = false;
-                    frame.type   = CANFDMessage::CAN_DATA;
                     memcpy(frame.data, e.data, 8);
 
                     /* tryToSend is non-blocking — if TX FIFO is full the frame
                        is dropped for this cycle. Do not hold the mutex across
                        SPI — release first, re-acquire. */
                     xSemaphoreGive(mutex);
-                    ctrl->tryToSend(frame);
+                    can_controller_send(*ctrl, frame);
                     xSemaphoreTake(mutex, portMAX_DELAY);
                 }
             }

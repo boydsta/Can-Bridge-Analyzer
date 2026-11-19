@@ -6,7 +6,7 @@
 #define CAN_BRIDGE_H
 
 #include <Arduino.h>
-#include <ACAN2517FD.h>
+#include "can_device.h"
 #include <vector>
 #include <algorithm>
 #include "can_analysis.h"
@@ -24,7 +24,7 @@ public:
      * @param rx_can Primary CAN controller (always monitored).
      * @param tx_can Second CAN controller, nullptr for monitor-only mode.
      */
-    CANBridge(ACAN2517FD* rx_can, ACAN2517FD* tx_can);
+    CANBridge(CANController* rx_can, CANController* tx_can);
 
     /** @brief Initialize the bridge and analysis engine. */
     void begin();
@@ -34,21 +34,21 @@ public:
      * @param frame CAN message from the receive handler.
      * @param bus_id Source bus (0 = CAN0, 1 = CAN1).
      */
-    void onMessageReceived(const CANFDMessage& frame, uint8_t bus_id);
+    void onMessageReceived(const CANFrame& frame, uint8_t bus_id);
 
     /**
      * @brief Check whether a message should be forwarded.
      * @param frame CAN message to evaluate.
      * @return true if the message should be forwarded.
      */
-    bool shouldForward(const CANFDMessage& frame);
+    bool shouldForward(const CANFrame& frame);
 
     /**
      * @brief Forward a message to the other bus.
      * @param frame CAN message to send.
      * @return true if sent successfully.
      */
-    bool forwardMessage(const CANFDMessage& frame);
+    bool forwardMessage(const CANFrame& frame);
 
     /** @brief Update statistics — call periodically from loop(). */
     void update();
@@ -72,8 +72,8 @@ public:
     std::vector<uint32_t> get_blocked_ids() const;
 
 private:
-    ACAN2517FD* can_rx;
-    ACAN2517FD* can_tx;
+    CANController* can_rx;
+    CANController* can_tx;
     CANAnalysis analysis;
 
     unsigned long last_update;
@@ -83,7 +83,7 @@ private:
 
     std::vector<uint32_t> blocked_ids;
 
-    int sendUsingExistingCode(const CANFDMessage& frame);
+    int sendUsingExistingCode(const CANFrame& frame);
 };
 
 #endif // CAN_BRIDGE_H

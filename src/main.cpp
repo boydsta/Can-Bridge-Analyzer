@@ -8,23 +8,24 @@
 #include <Arduino.h>
 #include <Preferences.h>
 
-#define MCP251863 2
-#define CAN_CHIP MCP251863
-
-#include <ACAN2517FD.h>
-
 #define SPUD_VERSION 1
 #include "spud.h"
+#include "can_config.h"
+#include "can_device.h"
 #include "can_bridge.h"
 #include "web_server.h"
-#include "can_config.h"
 #include "tx_scheduler.h"
 
 #define ARB_BIT_RATE 500000  // fallback for can_init default arg only
 
 /* Both controllers always compiled — enabled/disabled at runtime via g_cfg. */
+#if CAN_CHIP == MCP2515
+MCP_CAN can0(CS0);
+MCP_CAN can1(CS1);
+#else
 ACAN2517FD can0(CS0, SPI, INT0);
 ACAN2517FD can1(CS1, SPI, INT1);
+#endif
 
 CANBridge* can_bridge = nullptr;
 CANWebServer* web_server = nullptr;
@@ -32,7 +33,7 @@ CANWebServer* web_server = nullptr;
 bool can0_success = false;
 bool can1_success = false;
 
-CANFDMessage frame;
+CANFrame frame;
 const uint8_t max_messages_per_call = 64;
 uint8_t messages_processed = 0;
 unsigned long can1MessageProcTime = 0;
@@ -134,8 +135,10 @@ PerformanceStats perf_stats;
  *  Lambdas are NOT placed in IRAM — during SPI flash cache arbitration the
  *  CPU cannot fetch lambda code, causing missed INT edges and IWDT resets.
  *  These named functions live in IRAM and are never evicted. */
+#if CAN_CHIP != MCP2515
 void IRAM_ATTR can0_isr_wrapper() { can0.isr(); }
 void IRAM_ATTR can1_isr_wrapper() { can1.isr(); }
+#endif
 
 /** @brief Drain pending CAN INT events at the top of loop().
  *  MCP251863 INT is active-LOW level-triggered. A second event arriving
@@ -143,18 +146,21 @@ void IRAM_ATTR can1_isr_wrapper() { can1.isr(); }
  *  the ISR. Polling here (bounded to 16 iterations) ensures no frames are
  *  stranded in the controller FIFO. */
 static inline void handle_deferred_can_isr() {
+#if CAN_CHIP != MCP2515
   if (g_cfg.can0_enable) {
     for (int i = 0; i < 16 && digitalRead(INT0) == LOW; i++) { can0.isr(); }
   }
   if (g_cfg.can1_enable) {
     for (int i = 0; i < 16 && digitalRead(INT1) == LOW; i++) { can1.isr(); }
   }
+#endif
 }
 
 /** @brief Flush stale SPI transaction left in MCP251863 after an ESP32 reset.
  *  GPIO pins float briefly during the ESP32 reset edge, which can leave the
  *  MCP SPI state machine mid-transaction. Clocking 16 x 0xFF bytes discards
  *  the partial transaction, then 0xC0 forces a clean hardware controller reset. */
+#if CAN_CHIP != MCP2515
 static void mcp_spi_flush(uint8_t cs_pin) {
   digitalWrite(cs_pin, LOW);
   delayMicroseconds(10);
@@ -169,6 +175,7 @@ static void mcp_spi_flush(uint8_t cs_pin) {
   digitalWrite(cs_pin, HIGH);
   vTaskDelay(pdMS_TO_TICKS(5));
 }
+#endif
 
 /**
  * @brief Initialize CAN controllers.
@@ -177,11 +184,49 @@ static void mcp_spi_flush(uint8_t cs_pin) {
 static bool can_init() {
   delay(500);
 
+#if CAN_CHIP == MCP2515
+  SPI.begin(SCLK, SDI, SDO, CS0);
+#else
   /* ACAN2517FD manages CS internally via digitalWrite — do not pass a CS pin
      to SPI.begin() or the ESP32 SPI peripheral will fight with the library. */
   SPI.begin(SCLK, SDI, SDO);
+#endif
   delay(500);
+#if CAN_CHIP == MCP2515
+  auto bitrate_setting = [](uint32_t bps) -> uint8_t {
+    switch (bps) {
+      case 125000: return CAN_125KBPS;
+      case 250000: return CAN_250KBPS;
+      case 500000: return CAN_500KBPS;
+      case 1000000: return CAN_1000KBPS;
+      default: return CAN_500KBPS;
+    }
+  };
+  auto init_controller = [&](CANController& controller, const char* label, uint32_t bps) {
+    uint8_t result = CAN_FAIL;
+    for (int attempt = 1; attempt <= 5 && result != CAN_OK; attempt++) {
+      result = controller.begin(MCP_STDEXT, bitrate_setting(bps), MCP_8MHZ);
+      if (result == CAN_OK) {
+        result = controller.setMode(MCP_NORMAL);
+      }
+      if (result != CAN_OK && g_serial_logging && g_serial_mode == 0) {
+        Serial.printf("[%s] MCP2515 init failed (%u), attempt %d/5\n",
+                      label, result, attempt);
+      }
+      if (result != CAN_OK) delay(500);
+    }
+    if (g_serial_logging && g_serial_mode == 0) {
+      Serial.printf("[%s] MCP2515 init %s at %lu bps\n",
+                    label, result == CAN_OK ? "succeeded" : "failed",
+                    (unsigned long)bps);
+    }
+    return result == CAN_OK;
+  };
 
+  const uint32_t bps = k_bus_presets[g_cfg.bus_preset].arb_bps;
+  can0_success = !g_cfg.can0_enable || init_controller(can0, "CAN0", bps);
+  can1_success = !g_cfg.can1_enable || init_controller(can1, "CAN1", bps);
+#else
   if (g_cfg.can0_enable) {
     mcp_spi_flush(CS0);
     const BusPreset& p = k_bus_presets[g_cfg.bus_preset];
@@ -316,6 +361,7 @@ static bool can_init() {
     if (g_serial_logging && g_serial_mode == 0) { Serial.println("Skipping CAN1 setup (not enabled)."); }
     can1_success = true;
   }
+#endif
 
   return (can0_success || can1_success);
 }
@@ -331,7 +377,7 @@ void drain_can_rx_buffers() {
   if (g_cfg.can0_enable) {
     if (can0_success) {
       uint8_t can0_drained = 0;
-      while (can0.receive(frame) && can0_drained < max_drain_per_call) {
+      while (can_controller_receive(can0, frame) && can0_drained < max_drain_per_call) {
         can0_drained++;
       }
       if (can0_drained > 0) {
@@ -348,7 +394,7 @@ void drain_can_rx_buffers() {
   if (g_cfg.can1_enable) {
     if (can1_success) {
       uint8_t can1_drained = 0;
-      while (can1.receive(frame) && can1_drained < max_drain_per_call) {
+      while (can_controller_receive(can1, frame) && can1_drained < max_drain_per_call) {
         can1_drained++;
       }
       if (can1_drained > 0) {
@@ -423,6 +469,18 @@ void print_can_diagnostics() {
   unsigned long upSec = millis() / 1000;
   Serial.printf("\n=== CAN Diagnostics  uptime %lus ===\n", upSec);
 
+#if CAN_CHIP == MCP2515
+  auto report_bus = [](const char* label, CANController& ctrl, uint32_t bps) {
+    Serial.printf("[%s] CAN 2.0  %ubps  TX errors=%u  RX errors=%u\n",
+                  label, (unsigned)bps, ctrl.errorCountTX(), ctrl.errorCountRX());
+  };
+  if (g_cfg.can0_enable && can0_success) {
+    report_bus("CAN0", can0, k_bus_presets[g_bus_preset_idx].arb_bps);
+  }
+  if (g_cfg.can1_enable && can1_success) {
+    report_bus("CAN1", can1, k_bus_presets[g_bus_preset_idx].arb_bps);
+  }
+#else
   auto report_bus = [](const char* label, ACAN2517FD& ctrl, bool fd_mode, uint32_t bps) {
     uint32_t ec = ctrl.errorCounters();
     uint8_t  rec   = (uint8_t)(ec & 0xFF);
@@ -538,6 +596,7 @@ void print_can_diagnostics() {
   } else {
     Serial.println("[CAN1] Disabled in config.");
   }
+#endif
 
   Serial.println("==========================================");
 }
@@ -571,9 +630,9 @@ void print_can_ascii(uint8_t bus, long unsigned int id, uint8_t len, uint8_t *bu
 void handle_incoming_can() {
   messages_processed = 0;
 
-  if (g_cfg.can0_enable && can0.available()) {
+  if (g_cfg.can0_enable && can_controller_available(can0)) {
     can0MessageProcTime = micros();
-    while (can0.receive(frame) && messages_processed < max_messages_per_call) {
+    while (can_controller_receive(can0, frame) && messages_processed < max_messages_per_call) {
       messages_processed++;
       if (can_bridge != nullptr) {
         can_bridge->onMessageReceived(frame, 0);
@@ -582,16 +641,16 @@ void handle_incoming_can() {
         print_can_mesg(0, frame.id, frame.len, frame.data);
       }
     }
-    if (messages_processed >= max_messages_per_call && can0.available()) {
+    if (messages_processed >= max_messages_per_call && can_controller_available(can0)) {
       if (g_serial_logging && g_serial_mode == 0) { Serial.printf("CAN0: Processed %d messages, more pending\n", messages_processed); }
     }
     perf_stats.update_can0_proc(micros() - can0MessageProcTime, messages_processed);
   }
 
-  if (g_cfg.can1_enable && can1.available()) {
+  if (g_cfg.can1_enable && can_controller_available(can1)) {
     can1MessageProcTime = micros();
     messages_processed = 0;
-    while (can1.receive(frame) && messages_processed < max_messages_per_call) {
+    while (can_controller_receive(can1, frame) && messages_processed < max_messages_per_call) {
       messages_processed++;
       if (can_bridge != nullptr) {
         can_bridge->onMessageReceived(frame, 1);
@@ -600,7 +659,7 @@ void handle_incoming_can() {
         print_can_mesg(1, frame.id, frame.len, frame.data);
       }
     }
-    if (messages_processed >= max_messages_per_call && can1.available()) {
+    if (messages_processed >= max_messages_per_call && can_controller_available(can1)) {
       if (g_serial_logging && g_serial_mode == 0) { Serial.printf("CAN1: Processed %d messages, more pending\n", messages_processed); }
     }
     perf_stats.update_can1_proc(micros() - can1MessageProcTime, messages_processed);
