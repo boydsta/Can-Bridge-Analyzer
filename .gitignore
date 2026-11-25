@@ -1,0 +1,30 @@
+# PlatformIO build output
+.pio/
+
+# VSCode workspace settings (keep .vscode/extensions.json if you want)
+.vscode/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Compiled object files
+*.o
+*.obj
+
+# Firmware binaries
+*.bin
+*.elf
+*.hex
+
+# Logs
+*.log
+
+# Local planning notes — not committed to the public repo
+planning/
+
+# Local VS Code multi-root workspace (references private repos)
+*.code-workspace
