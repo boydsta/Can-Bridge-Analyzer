@@ -3,6 +3,23 @@
 #include <Preferences.h>
 #include "can_config.h"
 #include <SPIFFS.h>
+#include "wifi_net.h"
+
+/** @brief Escape text for an HTML body or a double-quoted attribute value. */
+static String html_escape(const char* in) {
+    String out;
+    for (const char* p = in; *p; p++) {
+        switch (*p) {
+            case '&':  out += "&amp;";  break;
+            case '<':  out += "&lt;";   break;
+            case '>':  out += "&gt;";   break;
+            case '"':  out += "&quot;"; break;
+            case '\'': out += "&#39;";  break;
+            default:   out += *p;       break;
+        }
+    }
+    return out;
+}
 
 /* [NEW] Full runtime config — set by setup() from NVS, read here for /api/get_config. */
 extern CANConfig g_cfg;
@@ -33,20 +50,8 @@ CANWebServer::CANWebServer(CANBridge* bridge)
     server.addHandler(&ws);
 }
 
-void CANWebServer::begin(const char* ssid, const char* password) {
+void CANWebServer::begin() {
     if (g_serial_logging && g_serial_mode == 0) { Serial.println("Starting web server..."); }
-
-    // Configure WiFi AP
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(ssid, password);
-    WiFi.softAPConfig(IPAddress(192, 168, 1, 1),
-                      IPAddress(192, 168, 1, 1),
-                      IPAddress(255, 255, 255, 0));
-
-    if (g_serial_logging && g_serial_mode == 0) {
-      Serial.printf("WiFi AP: %s\n", ssid);
-      Serial.printf("IP Address: %s\n", WiFi.softAPIP().toString().c_str());
-    }
 
     // Serve main page — served directly from flash (static const) to avoid large heap copy
     server.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) {
@@ -159,7 +164,9 @@ void CANWebServer::begin(const char* ssid, const char* password) {
     /* /api/set_config — save all settings to NVS then reboot.
        POST body (form-encoded): can0_enable=1&can1_enable=0&bus_preset=2&name=MY-LOGGER */
     server.on("/api/set_config", HTTP_POST, [](AsyncWebServerRequest *request) {
-        CANConfig cfg;
+        /* Start from the live config so fields not on this form (e.g. active_dbcs)
+           are preserved rather than saved as uninitialised garbage. */
+        CANConfig cfg = g_cfg;
 
         /* Checkboxes absent = false (enable flags). */
         cfg.can0_enable = request->hasParam("can0_enable", true);
@@ -207,6 +214,66 @@ void CANWebServer::begin(const char* ssid, const char* password) {
         strncpy(cfg.wifi_pass, wp.c_str(), sizeof(cfg.wifi_pass) - 1);
         cfg.wifi_pass[sizeof(cfg.wifi_pass) - 1] = '\0';
 
+        auto param = [request](const char* name) -> String {
+            if (!request->hasParam(name, true)) return String();
+            String v = request->getParam(name, true)->value();
+            v.trim();
+            return v;
+        };
+        auto bad = [request](const char* msg) {
+            request->send(400, "application/json", String("{\"error\":\"") + msg + "\"}");
+        };
+
+        // WiFi mode: 0 = own hotspot, 1 = join a network (hotspot fallback)
+        cfg.wifi_mode = (param("wifi_mode") == "1") ? WIFI_MODE_CFG_STA : WIFI_MODE_CFG_AP;
+
+        // Network to join — kept even in hotspot mode so switching back is easy
+        String sts = param("sta_ssid");
+        if (sts.length() > 32) sts = sts.substring(0, 32);
+        if (cfg.wifi_mode == WIFI_MODE_CFG_STA && sts.length() == 0) {
+            bad("Enter the network name (SSID) to join"); return;
+        }
+        strncpy(cfg.sta_ssid, sts.c_str(), sizeof(cfg.sta_ssid) - 1);
+        cfg.sta_ssid[sizeof(cfg.sta_ssid) - 1] = '\0';
+
+        String stp = request->hasParam("sta_pass", true) ? request->getParam("sta_pass", true)->value() : String();
+        if (stp.length() > 0 && stp.length() < 8) {
+            bad("Network password must be at least 8 characters, or blank for an open network"); return;
+        }
+        if (stp.length() > 63) stp = stp.substring(0, 63);
+        strncpy(cfg.sta_pass, stp.c_str(), sizeof(cfg.sta_pass) - 1);
+        cfg.sta_pass[sizeof(cfg.sta_pass) - 1] = '\0';
+
+        // Addressing: DHCP or static
+        cfg.sta_static = (param("ip_mode") == "static");
+        if (cfg.sta_static) {
+            IPAddress ip, mask, gw, dns;
+            if (!ip.fromString(param("sta_ip")))     { bad("Invalid static IP address"); return; }
+            if (!mask.fromString(param("sta_mask"))) { bad("Invalid subnet mask"); return; }
+            if (!gw.fromString(param("sta_gw")))     { bad("Invalid gateway address"); return; }
+            String d = param("sta_dns");
+            if (d.length() == 0) dns = IPAddress((uint32_t)0);
+            else if (!dns.fromString(d))             { bad("Invalid DNS address"); return; }
+            cfg.sta_ip = (uint32_t)ip; cfg.sta_mask = (uint32_t)mask;
+            cfg.sta_gw = (uint32_t)gw; cfg.sta_dns  = (uint32_t)dns;
+        }
+
+        // Hostname: lowercase letters, digits, '-'; must start with a letter/digit
+        String hn = param("hostname");
+        hn.toLowerCase();
+        if (hn.length() == 0) {
+            default_hostname(cfg.hostname, sizeof(cfg.hostname));
+        } else {
+            if (hn.length() > 32) { bad("Device name must be 32 characters or fewer"); return; }
+            for (size_t i = 0; i < hn.length(); i++) {
+                char c = hn[i];
+                bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c == '-' && i > 0);
+                if (!ok) { bad("Device name may only use letters, digits and '-' (not first)"); return; }
+            }
+            strncpy(cfg.hostname, hn.c_str(), sizeof(cfg.hostname) - 1);
+            cfg.hostname[sizeof(cfg.hostname) - 1] = '\0';
+        }
+
         save_can_config(cfg);
         if (g_serial_logging && g_serial_mode == 0) {
           Serial.printf("[CFG] Saved: CAN0=%s | CAN1=%s | preset=%u (%s). Rebooting...\n",
@@ -214,10 +281,21 @@ void CANWebServer::begin(const char* ssid, const char* password) {
                         cfg.can1_enable ? "ON" : "OFF",
                         cfg.bus_preset, k_bus_presets[cfg.bus_preset].label);
         }
-        request->send(200, "text/html",
-            "<html><body style='font-family:monospace;background:#1a1a1a;color:#2ecc71;padding:40px'>"
-            "<h2>Config saved.</h2><p>Rebooting in 1 second...</p>"
-            "<script>setTimeout(()=>location.href='/',2500)</script></body></html>");
+        String done = "<html><body style='font-family:monospace;background:#1a1a1a;color:#2ecc71;padding:40px'>"
+                      "<h2>Config saved.</h2><p>Rebooting in 1 second...</p>";
+        if (cfg.wifi_mode == WIFI_MODE_CFG_STA) {
+            String where = cfg.sta_static ? IPAddress(cfg.sta_ip).toString()
+                                          : String(cfg.hostname) + ".local";
+            done += "<p style='color:#ecf0f1'>The device will now join <b>" + html_escape(cfg.sta_ssid) +
+                    "</b>. Connect this computer to that network and open "
+                    "<a style='color:#3498db' href='http://" + where + "/'>http://" + where + "/</a>";
+            if (!cfg.sta_static) done += " (or the IP your router assigns)";
+            done += ".</p><p style='color:#95a5a6'>If it cannot join within 20 s it falls back to its own "
+                    "hotspot <b>" + html_escape(cfg.wifi_ssid) + "</b> at http://192.168.1.1.</p></body></html>";
+        } else {
+            done += "<script>setTimeout(()=>location.href='/',2500)</script></body></html>";
+        }
+        request->send(200, "text/html", done);
         delay(800);
         ESP.restart();
     });
@@ -3052,23 +3130,116 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
   <form method="POST" action="/api/set_config">
 
     <div class="card">
-      <div class="card-head">WiFi Access Point <span>Requires reboot to apply</span></div>
+      <div class="card-head">WiFi <span>Requires reboot to apply</span></div>
       <div class="row">
-        <label style="min-width:180px">Network name (SSID)</label>
+        <label style="min-width:180px">Current status</label>
+        <div class="desc" style="flex:1;color:var(--text)">)html";
+    page += html_escape(wifi_net_status().c_str());
+    page += R"html(</div>
+      </div>
+      <div class="row">
+        <label><input type="radio" name="wifi_mode" value="0")html";
+    page += chk(g_cfg.wifi_mode == WIFI_MODE_CFG_AP);
+    page += R"html( onchange="wifiUi()"> Own hotspot</label>
+        <div class="desc">The device runs its own WiFi network at http://192.168.1.1.
+          Simplest for one unit.</div>
+      </div>
+      <div class="row">
+        <label><input type="radio" name="wifi_mode" value="1")html";
+    page += chk(g_cfg.wifi_mode == WIFI_MODE_CFG_STA);
+    page += R"html( onchange="wifiUi()"> Join a network</label>
+        <div class="desc">The device joins your router or phone hotspot, so several units can be
+          reached from one computer. If it cannot join within 20 s it falls back to its own
+          hotspot (below) and keeps retrying while nobody is connected to it.</div>
+      </div>
+
+      <div id="sta-box">
+      <div class="row">
+        <label style="min-width:180px">Network to join (SSID)</label>
+        <div style="flex:1">
+          <input type="text" name="sta_ssid" maxlength="32" value=")html";
+    page += html_escape(g_cfg.sta_ssid);
+    page += R"html(">
+        </div>
+      </div>
+      <div class="row">
+        <label style="min-width:180px">Network password</label>
+        <div style="flex:1">
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="password" id="sta_pass_input" name="sta_pass" maxlength="63"
+              autocomplete="new-password" value=")html";
+    page += html_escape(g_cfg.sta_pass);
+    page += R"html(">
+            <button type="button" class="btn secondary" style="white-space:nowrap;padding:5px 10px"
+              onclick="var i=document.getElementById('sta_pass_input');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'Show':'Hide'">Show</button>
+          </div>
+          <div class="desc">Blank for an open network. 2.4 GHz networks only.</div>
+        </div>
+      </div>
+      <div class="row">
+        <label style="min-width:180px">Device name</label>
+        <div style="flex:1">
+          <input type="text" name="hostname" maxlength="32" value=")html";
+    page += html_escape(g_cfg.hostname);
+    page += R"html(">
+          <div class="desc">Reach the unit at <code>http://&lt;name&gt;.local</code> and see it under this
+            name in your router. Give each unit a different name, e.g. <code>canbridge-front</code>.
+            Letters, digits and '-'. Blank = default from the MAC address.</div>
+        </div>
+      </div>
+      <div class="row">
+        <label><input type="radio" name="ip_mode" value="dhcp")html";
+    page += chk(!g_cfg.sta_static);
+    page += R"html( onchange="wifiUi()"> Automatic IP (DHCP)</label>
+        <div class="desc">The router assigns the address. Recommended — use the device name above to find it.</div>
+      </div>
+      <div class="row">
+        <label><input type="radio" name="ip_mode" value="static")html";
+    page += chk(g_cfg.sta_static);
+    page += R"html( onchange="wifiUi()"> Static IP</label>
+        <div class="desc">Fixed address. Must be inside your network's subnet and outside its DHCP range.
+          Phone hotspots change subnet (Android) or use 172.20.10.x (iPhone) — use DHCP with those.</div>
+      </div>
+      <div id="static-box">)html";
+
+    auto ipField = [&](const char* label, const char* name, uint32_t v, const char* ph) {
+        page += "<div class=\"row\"><label style=\"min-width:180px\">";
+        page += label;
+        page += "</label><div style=\"flex:1\"><input type=\"text\" name=\"";
+        page += name;
+        page += "\" placeholder=\"";
+        page += ph;
+        page += "\" value=\"";
+        if (v != 0) page += IPAddress(v).toString();
+        page += "\"></div></div>";
+    };
+    ipField("IP address",  "sta_ip",   g_cfg.sta_ip,   "192.168.0.50");
+    ipField("Subnet mask", "sta_mask", g_cfg.sta_mask ? g_cfg.sta_mask : (uint32_t)IPAddress(255,255,255,0), "255.255.255.0");
+    ipField("Gateway",     "sta_gw",   g_cfg.sta_gw,   "192.168.0.1");
+    ipField("DNS (optional)", "sta_dns", g_cfg.sta_dns, "blank = gateway");
+
+    page += R"html(</div>
+      </div>
+
+      <div class="row" style="background:var(--card-hd)">
+        <div class="desc" style="flex:1;font-weight:700;color:var(--text-hdr)">Own / fallback hotspot</div>
+      </div>
+      <div class="row">
+        <label style="min-width:180px">Hotspot name (SSID)</label>
         <div style="flex:1">
           <input type="text" name="wifi_ssid" maxlength="32" value=")html";
-    page += String(g_cfg.wifi_ssid);
+    page += html_escape(g_cfg.wifi_ssid);
     page += R"html(">
           <div class="desc">The WiFi network name devices will see. Max 32 characters.</div>
         </div>
       </div>
       <div class="row">
-        <label style="min-width:180px">Password</label>
+        <label style="min-width:180px">Hotspot password</label>
         <div style="flex:1">
           <div style="display:flex;gap:8px;align-items:center">
             <input type="password" id="wifi_pass_input" name="wifi_pass" maxlength="63"
               autocomplete="new-password" value=")html";
-    page += String(g_cfg.wifi_pass);
+    page += html_escape(g_cfg.wifi_pass);
     page += R"html(">
             <button type="button" class="btn secondary" style="white-space:nowrap;padding:5px 10px"
               onclick="var i=document.getElementById('wifi_pass_input');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'Show':'Hide'">Show</button>
@@ -3076,6 +3247,12 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
           <div class="desc">Leave blank for an open (no password) network.
             If a password is set it must be at least 8 characters (WPA2 minimum).</div>
         </div>
+      </div>
+      <div class="row">
+        <div class="desc" style="flex:1">Locked out? Bridge <b>AI2 (pin 24)</b> to <b>+12 V (pin 1)</b> for
+          about a second. All settings are erased and the unit reboots to hotspot
+          <code>CanBridgeAnalyzer</code> / <code>canbus123</code> at http://192.168.1.1.
+          DBC files are kept.</div>
       </div>
     </div>
 
@@ -3150,6 +3327,13 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
   </div>
 </div>
 <script>
+function wifiUi() {
+  var sta = document.querySelector('input[name="wifi_mode"][value="1"]').checked;
+  var st  = document.querySelector('input[name="ip_mode"][value="static"]').checked;
+  document.getElementById('sta-box').style.display = sta ? '' : 'none';
+  document.getElementById('static-box').style.display = (sta && st) ? '' : 'none';
+}
+wifiUi();
 document.querySelector('form').addEventListener('submit', function(e) {
   e.preventDefault();
   if (!confirm('Save settings and reboot the device?')) return;

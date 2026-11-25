@@ -26,7 +26,10 @@ extern volatile bool g_serial_logging;
 extern volatile uint8_t g_serial_mode;
 
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <Preferences.h>
+#include <esp_system.h>
 
 // ---------------------------------------------------------------------------
 // Bus preset table — combines arbitration speed, CAN FD data multiplier, and
@@ -73,10 +76,30 @@ struct CANConfig {
   bool     can1_print;      ///< Print CAN1 frames to USB serial
   uint8_t  bus_preset;      ///< Index into k_bus_presets[] — encodes speed + frame type
   uint8_t  serial_mode;     ///< 0=Diagnostics  1=SavvyCAN CSV  2=Binary GVRET
-  char     wifi_ssid[33];   ///< WiFi AP SSID (max 32 chars)
+  char     wifi_ssid[33];   ///< WiFi AP SSID (max 32 chars) — own hotspot, also the fallback
   char     wifi_pass[64];   ///< WiFi AP password; empty = open network
   char     active_dbcs[128]; ///< Comma-separated list of active DBC files (e.g. "leaf.dbc,tesla.dbc"); empty = none
+
+  uint8_t  wifi_mode;       ///< WIFI_MODE_CFG_AP or WIFI_MODE_CFG_STA
+  char     sta_ssid[33];    ///< Network to join (station mode)
+  char     sta_pass[64];    ///< Password of the network to join; empty = open
+  bool     sta_static;      ///< true = static IP below, false = DHCP
+  uint32_t sta_ip;          ///< Static IP (IPAddress as uint32_t)
+  uint32_t sta_mask;        ///< Static subnet mask
+  uint32_t sta_gw;          ///< Static gateway
+  uint32_t sta_dns;         ///< Static DNS server; 0 = use gateway
+  char     hostname[33];    ///< DHCP hostname and mDNS name (<hostname>.local)
 };
+
+static const uint8_t WIFI_MODE_CFG_AP  = 0;  ///< Run own hotspot only (default)
+static const uint8_t WIFI_MODE_CFG_STA = 1;  ///< Join a network; fall back to own hotspot on failure
+
+/** @brief Default hostname "canbridge-xxxxxx" from the last 3 bytes of the factory MAC. */
+inline void default_hostname(char* out, size_t len) {
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  snprintf(out, len, "canbridge-%02x%02x%02x", mac[3], mac[4], mac[5]);
+}
 
 /** @brief Load CANConfig from NVS, applying sensible defaults. */
 inline CANConfig load_can_config() {
@@ -99,6 +122,24 @@ inline CANConfig load_can_config() {
   String dbc = prefs.getString("active_dbcs", "");
   strncpy(cfg.active_dbcs, dbc.c_str(), sizeof(cfg.active_dbcs) - 1);
   cfg.active_dbcs[sizeof(cfg.active_dbcs) - 1] = '\0';
+
+  cfg.wifi_mode = (uint8_t)prefs.getUChar("wifi_mode", WIFI_MODE_CFG_AP);
+  if (cfg.wifi_mode > WIFI_MODE_CFG_STA) cfg.wifi_mode = WIFI_MODE_CFG_AP;
+  String sts = prefs.getString("sta_ssid", "");
+  strncpy(cfg.sta_ssid, sts.c_str(), sizeof(cfg.sta_ssid) - 1);
+  cfg.sta_ssid[sizeof(cfg.sta_ssid) - 1] = '\0';
+  String stp = prefs.getString("sta_pass", "");
+  strncpy(cfg.sta_pass, stp.c_str(), sizeof(cfg.sta_pass) - 1);
+  cfg.sta_pass[sizeof(cfg.sta_pass) - 1] = '\0';
+  cfg.sta_static = prefs.getBool("sta_static", false);
+  cfg.sta_ip     = prefs.getUInt("sta_ip",   0);
+  cfg.sta_mask   = prefs.getUInt("sta_mask", 0);
+  cfg.sta_gw     = prefs.getUInt("sta_gw",   0);
+  cfg.sta_dns    = prefs.getUInt("sta_dns",  0);
+  String hn = prefs.getString("hostname", "");
+  strncpy(cfg.hostname, hn.c_str(), sizeof(cfg.hostname) - 1);
+  cfg.hostname[sizeof(cfg.hostname) - 1] = '\0';
+  if (cfg.hostname[0] == '\0') default_hostname(cfg.hostname, sizeof(cfg.hostname));
   prefs.end();
   return cfg;
 }
@@ -116,6 +157,15 @@ inline void save_can_config(const CANConfig& cfg) {
   prefs.putString("wifi_ssid", cfg.wifi_ssid);
   prefs.putString("wifi_pass", cfg.wifi_pass);
   prefs.putString("active_dbcs", cfg.active_dbcs);
+  prefs.putUChar("wifi_mode",  cfg.wifi_mode);
+  prefs.putString("sta_ssid",  cfg.sta_ssid);
+  prefs.putString("sta_pass",  cfg.sta_pass);
+  prefs.putBool("sta_static",  cfg.sta_static);
+  prefs.putUInt("sta_ip",      cfg.sta_ip);
+  prefs.putUInt("sta_mask",    cfg.sta_mask);
+  prefs.putUInt("sta_gw",      cfg.sta_gw);
+  prefs.putUInt("sta_dns",     cfg.sta_dns);
+  prefs.putString("hostname",  cfg.hostname);
   prefs.end();
 }
 

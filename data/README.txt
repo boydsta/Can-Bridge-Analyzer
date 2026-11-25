@@ -16,7 +16,10 @@ The Nissan Leaf DBC files
     QC-CAN_ALL.dbc
 
 are from Dala's (dalathegreat) leaf_can_bus_messages project:
-https://github.com/dalathegreat/leaf_can_bus_messages
+https://github.com/dalathegreat/leaf_can_bus_messages  (commit 6eca0f8, 2026-07-06)
+which is forked from baradhili's original project:
+https://github.com/baradhili/leaf_can_bus_messages
+Thanks to Dala, baradhili and all contributors.
 They are licensed under the GNU GPL v3 -- see LICENSE-GPL-3.0.txt.
 They are distributed unmodified as separate data files and are not part of the
 MIT-licensed firmware.

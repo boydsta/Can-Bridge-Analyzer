@@ -16,6 +16,8 @@
 #include "can_bridge.h"
 #include "web_server.h"
 #include "tx_scheduler.h"
+#include "wifi_net.h"
+#include "factory_reset.h"
 
 #define ARB_BIT_RATE 500000  // fallback for can_init default arg only
 
@@ -592,7 +594,13 @@ void setup() {
     Serial.println("=========================================================");
   }
 
-  delay(5000);
+  /* Boot settle delay — also watches AI2 so a factory reset works even if
+     the saved config makes later startup misbehave. */
+  factory_reset_begin();
+  for (unsigned long t0 = millis(); millis() - t0 < 5000; ) {
+    factory_reset_poll();
+    delay(5);
+  }
 
   g_cfg = load_can_config();
   g_bus_preset_idx = g_cfg.bus_preset;
@@ -654,30 +662,15 @@ void setup() {
   g_tx_sched.begin(can0_success ? &can0 : nullptr,
                    can1_success ? &can1 : nullptr);
 
-  if (g_serial_logging && g_serial_mode == 0) { Serial.println("Starting WiFi Access Point..."); }
+  /* WiFi: own hotspot, or join a network with hotspot fallback (non-blocking;
+     wifi_net_loop() drives the connect / fallback state machine). */
+  wifi_net_begin(g_cfg);
 
-  if (can_bridge != nullptr) {
-    web_server = new CANWebServer(can_bridge);
-    web_server->begin(g_cfg.wifi_ssid, g_cfg.wifi_pass[0] ? g_cfg.wifi_pass : nullptr);
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Web server started with CAN bridge"); }
-  } else {
-    WiFi.mode(WIFI_AP);
-    IPAddress local_ip(192, 168, 1, 1);
-    IPAddress gateway(192, 168, 1, 1);
-    IPAddress subnet(255, 255, 255, 0);
-    WiFi.softAPConfig(local_ip, gateway, subnet);
-    WiFi.softAP(g_cfg.wifi_ssid, g_cfg.wifi_pass[0] ? g_cfg.wifi_pass : nullptr);
-    if (g_serial_logging && g_serial_mode == 0) {
-      Serial.println("=== WiFi Access Point Started (CAN disabled) ===");
-      Serial.printf("SSID: %s\n", g_cfg.wifi_ssid);
-      Serial.printf("Password: %s\n", g_cfg.wifi_pass[0] ? g_cfg.wifi_pass : "(none - open)");
-      Serial.printf("IP Address: %s\n", WiFi.softAPIP().toString().c_str());
-      Serial.println("Connect to WiFi and navigate to: http://192.168.1.1");
-      Serial.println("Note: CAN functionality disabled due to initialization failure");
-    }
-    web_server = new CANWebServer(nullptr);
-    web_server->begin(g_cfg.wifi_ssid, g_cfg.wifi_pass[0] ? g_cfg.wifi_pass : nullptr);
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Web server started without CAN bridge"); }
+  web_server = new CANWebServer(can_bridge);
+  web_server->begin();
+  if (g_serial_logging && g_serial_mode == 0) {
+    Serial.println(can_bridge ? "Web server started with CAN bridge"
+                              : "Web server started without CAN bridge (CAN disabled or init failed)");
   }
   if (g_serial_logging && g_serial_mode == 0) { Serial.println("Setup complete"); }
 }
@@ -772,6 +765,9 @@ static void handle_gvret_commands() {
 
 void loop() {
   unsigned long loop_start = micros();
+
+  factory_reset_poll();
+  wifi_net_loop();
 
   if (web_server != nullptr) {
     /* No firmware update, reboot or rollback while CAN traffic is flowing —

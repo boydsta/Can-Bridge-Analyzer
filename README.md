@@ -73,9 +73,25 @@ Go to **http://192.168.1.1/config** to set:
 - CAN bus enable (CAN0, CAN1, or both)
 - Bus speed and frame type (125k–1M CAN 2.0 or CAN FD up to 8 Mbps data rate)
 - Serial output mode (diagnostics / SavvyCAN CSV / binary GVRET)
-- WiFi SSID and password
+- WiFi: own hotspot, or **join a network** (router or phone hotspot)
+- Join mode: DHCP or static IP, and a device name reachable as `http://<name>.local`
 
 Changes are saved to flash and take effect after reboot.
+
+### Running several units
+
+Set each unit to **Join a network** on the same router and give each one a
+different device name (e.g. `canbridge-front`, `canbridge-rear`). Then open
+`http://canbridge-front.local` etc. from one laptop. If a unit cannot join
+within 20 s, it falls back to its own hotspot (`CanBridgeAnalyzer` at
+192.168.1.1) and keeps retrying the network while nobody is connected to it.
+
+### Factory reset
+
+Bridge **AI2 (pin 24)** to **+12V (pin 1)** for at least 200 ms while the unit is
+powered. All settings (WiFi, CAN, TX schedule, markers) are erased and it reboots
+to the default hotspot `CanBridgeAnalyzer` / `canbus123` at http://192.168.1.1.
+DBC files are kept. AI2 is reserved for this; don't wire it to a sensor.
 
 ---
 
@@ -151,7 +167,9 @@ your own `.dbc` files over WiFi. Decoded signal names and values are shown in th
 web dashboard.
 
 The Leaf DBC files are from [Dala's (dalathegreat) leaf_can_bus_messages](https://github.com/dalathegreat/leaf_can_bus_messages)
-project — many thanks to Dala and its contributors for years of Leaf CAN
+project (commit `6eca0f8`, July 2026), which is forked from
+[baradhili/leaf_can_bus_messages](https://github.com/baradhili/leaf_can_bus_messages)
+— many thanks to Dala, baradhili and all contributors for years of Leaf CAN
 reverse-engineering. They are licensed under GPL-3.0 (see
 [`data/LICENSE-GPL-3.0.txt`](data/LICENSE-GPL-3.0.txt)) and are included unmodified
 as separate data files.
@@ -184,7 +202,7 @@ local ESP32 stability fixes — see [`PATCHES.md`](lib/ACAN2517FD/PATCHES.md).
 Firmware: MIT — see [LICENSE](LICENSE).
 
 - `lib/ACAN2517FD` — MIT, © Pierre Molinaro (see its `LICENSE`)
-- Nissan Leaf DBC files in `data/` — GPL-3.0, from [dalathegreat/leaf_can_bus_messages](https://github.com/dalathegreat/leaf_can_bus_messages)
+- Nissan Leaf DBC files in `data/` — GPL-3.0, from [dalathegreat/leaf_can_bus_messages](https://github.com/dalathegreat/leaf_can_bus_messages) (forked from [baradhili/leaf_can_bus_messages](https://github.com/baradhili/leaf_can_bus_messages))
 
 ---
 

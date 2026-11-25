@@ -31,12 +31,8 @@ public:
      */
     CANWebServer(CANBridge* bridge);
 
-    /**
-     * @brief Start the WiFi AP and web server.
-     * @param ssid     WiFi network name.
-     * @param password WiFi password (nullptr or empty = open network).
-     */
-    void begin(const char* ssid = "CanBridgeAnalyzer", const char* password = "canbus123");
+    /** @brief Start the web server.  WiFi is brought up separately by wifi_net_begin(). */
+    void begin();
 
     /** @brief Push updated CAN data to connected clients — call from loop(). */
     void update();
