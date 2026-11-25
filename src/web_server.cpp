@@ -567,6 +567,17 @@ void CANWebServer::begin(const char* ssid, const char* password) {
         }
     );
 
+    // Firmware and SPIFFS (DBC image) updates over WiFi at /update
+    ota.setFirmwareVersion(FW_VERSION);
+#if CAN_CHIP == MCP2515
+    ota.setHardwareID("CAN Bridge Analyzer (MCP2515)");
+#else
+    ota.setHardwareID("CAN Bridge Analyzer (MCP251863)");
+#endif
+    // Blocked until loop() first checks for CAN traffic (see main.cpp)
+    ota.setUpdateAllowed(false, "Starting up");
+    ota.begin(&server);
+
     // Start server
     server.begin();
     if (g_serial_logging && g_serial_mode == 0) { Serial.println("Web server started successfully"); }
@@ -868,6 +879,7 @@ const char* CANWebServer::generateMainPage() {
             <a href="/dbc" class="btn small secondary" style="text-decoration:none">&#128196; DBC</a>
             <a href="/tx" class="btn small secondary" style="text-decoration:none">&#128257; TX Sched</a>
             <a href="/markers" class="btn small secondary" style="text-decoration:none">&#128204; Markers</a>
+            <a href="/update" class="btn small secondary" style="text-decoration:none">&#11014; OTA</a>
         </div>
     </div>
 
@@ -3086,7 +3098,7 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
     </div>
 
     <div class="card">
-      <div class="card-head">CAN0 — Bus 0 (left connector) <span>Physical CAN controller 0</span></div>
+      <div class="card-head">CAN0 — Bus 0 (left panel) <span>Connector pins 20 (H) / 8 (L)</span></div>
       <div class="row">
         <label><input type="checkbox" name="can0_enable")html";
     page += chk(g_cfg.can0_enable);
@@ -3102,7 +3114,7 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
     </div>
 
     <div class="card">
-      <div class="card-head">CAN1 — Bus 1 (right connector) <span>Physical CAN controller 1</span></div>
+      <div class="card-head">CAN1 — Bus 1 (right panel) <span>Connector pins 19 (H) / 7 (L)</span></div>
       <div class="row">
         <label><input type="checkbox" name="can1_enable")html";
     page += chk(g_cfg.can1_enable);
@@ -3123,6 +3135,19 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
     </div>
 
   </form>
+
+  <!-- ── FIRMWARE UPDATE ─────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-head">Firmware update <span>v)html";
+    page += FW_VERSION;
+    page += R"html(</span></div>
+    <div class="row">
+      <div class="desc" style="flex:1">Upload new firmware (<code>firmware.bin</code>) or a DBC filesystem
+        image (<code>spiffs.bin</code>) over WiFi. The previous firmware is kept and can be restored with Rollback.
+        Updates are blocked while CAN traffic is flowing &mdash; turn the vehicle off or disconnect CAN first.</div>
+      <a href="/update" class="btn primary" style="white-space:nowrap">&#11014; Open update page</a>
+    </div>
+  </div>
 </div>
 <script>
 document.querySelector('form').addEventListener('submit', function(e) {

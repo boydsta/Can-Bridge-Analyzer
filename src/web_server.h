@@ -9,11 +9,15 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncWebSocket.h>
+#include <CustomOTA.h>
 #include "can_bridge.h"
 #include "can_config.h"
 #include "dbc_parser.h"
 #include "tx_scheduler.h"
 #include "marker_plan.h"
+
+/** @brief Firmware version shown on the OTA page (/update). Keep in step with the README. */
+#define FW_VERSION "0.3.0"
 
 /**
  * @brief Web server for the CAN Bridge Analyzer interface.
@@ -40,10 +44,17 @@ public:
     /** @return Number of currently connected WebSocket clients. */
     uint32_t getClientCount() const { return client_count; }
 
+    /** @brief Service OTA (deferred restart, upload timeout) — call every loop(). */
+    void handleOTA() { ota.handle(); }
+
+    /** @brief OTA update gate — call every loop(). @p reason must be a static string. */
+    void setUpdateAllowed(bool allowed, const char* reason) { ota.setUpdateAllowed(allowed, reason); }
+
 private:
     CANBridge* can_bridge;
     AsyncWebServer server;
     AsyncWebSocket ws;
+    CustomOTA ota;   //!< Firmware / SPIFFS updates over WiFi at /update
     DBCParser dbc_parser;
 
     uint32_t client_count;

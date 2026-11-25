@@ -79,6 +79,33 @@ Changes are saved to flash and take effect after reboot.
 
 ---
 
+## Over-the-Air Updates
+
+After the first USB flash, firmware and the DBC filesystem can be updated over
+WiFi using [CustomOTA](https://github.com/boydsta/CustomOTA-ESP32).
+
+1. Connect to the device's WiFi and open **http://192.168.1.1/update** (or the
+   **OTA** button on the dashboard).
+2. Upload `.pio/build/<env>/firmware.bin` for firmware, or
+   `.pio/build/<env>/spiffs.bin` (from `pio run -e <env> -t buildfs`) for the
+   DBC files.
+3. The device restarts on the new firmware. The previous firmware is kept and
+   can be restored with **Rollback**.
+
+The flash layout is set by [`partitions.csv`](partitions.csv): two 1.625 MB
+firmware slots and 704 KB of SPIFFS for DBC files.
+
+A filesystem upload replaces all files in SPIFFS, including any DBC files
+uploaded through the web UI.
+
+**Updates are locked out while CAN traffic is flowing**, because the restart
+would interrupt the bridge. The OTA page greys out and shows the reason until
+no frames have been received on either bus for 3 seconds (e.g. vehicle off or
+CAN disconnected). An upload already in progress is aborted if traffic starts,
+and the running firmware is left unchanged.
+
+---
+
 ## Serial Logging
 
 Connect a USB serial monitor at **115200 baud**.

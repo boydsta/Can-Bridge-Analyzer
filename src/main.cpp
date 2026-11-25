@@ -40,6 +40,11 @@ uint8_t messages_processed = 0;
 unsigned long can1MessageProcTime = 0;
 unsigned long can0MessageProcTime = 0;
 
+/** @brief millis() of the last frame received on either bus (0 = none yet). */
+unsigned long g_last_can_rx_ms = 0;
+/** @brief OTA updates/restarts are blocked until the buses have been quiet this long. */
+const unsigned long k_ota_quiet_ms = 3000;
+
 /* Active preset index — set in setup() from g_cfg.bus_preset. */
 uint8_t g_bus_preset_idx = k_default_preset;
 
@@ -548,6 +553,7 @@ void handle_incoming_can() {
     if (messages_processed >= max_messages_per_call && can_controller_available(can0)) {
       if (g_serial_logging && g_serial_mode == 0) { Serial.printf("CAN0: Processed %d messages, more pending\n", messages_processed); }
     }
+    if (messages_processed > 0) g_last_can_rx_ms = millis();
     perf_stats.update_can0_proc(micros() - can0MessageProcTime, messages_processed);
   }
 
@@ -566,6 +572,7 @@ void handle_incoming_can() {
     if (messages_processed >= max_messages_per_call && can_controller_available(can1)) {
       if (g_serial_logging && g_serial_mode == 0) { Serial.printf("CAN1: Processed %d messages, more pending\n", messages_processed); }
     }
+    if (messages_processed > 0) g_last_can_rx_ms = millis();
     perf_stats.update_can1_proc(micros() - can1MessageProcTime, messages_processed);
   }
 }
@@ -765,6 +772,15 @@ static void handle_gvret_commands() {
 
 void loop() {
   unsigned long loop_start = micros();
+
+  if (web_server != nullptr) {
+    /* No firmware update, reboot or rollback while CAN traffic is flowing —
+       the restart would interrupt the bridge. */
+    bool can_quiet = (g_last_can_rx_ms == 0) || (millis() - g_last_can_rx_ms >= k_ota_quiet_ms);
+    web_server->setUpdateAllowed(can_quiet,
+        "CAN traffic is flowing - updates are blocked until both buses have been quiet for 3 s");
+    web_server->handleOTA();
+  }
 
   handle_gvret_commands();
 

@@ -1,0 +1,17 @@
+# CAN Bridge Analyzer - 4MB flash partition table (CustomOTA)
+#
+# Two equal app slots for OTA with rollback, sized for growth: the firmware
+# is ~1.1MB, so each 1.625MB slot leaves ~500KB headroom (the ESP32 default
+# 1.25MB slots left only ~200KB).
+#
+# SPIFFS holds DBC files only (~200KB shipped in data/) plus user uploads and
+# the marker plan, so it is reduced from the default 1.375MB to 704KB.
+#
+# Same layout as CustomOTA-ESP32/partitions/default.csv.
+#
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x5000
+otadata,  data, ota,     0xe000,   0x2000
+app0,     app,  ota_0,   0x10000,  0x1A0000
+app1,     app,  ota_1,   0x1B0000, 0x1A0000
+spiffs,   data, spiffs,  0x350000, 0xB0000
