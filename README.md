@@ -10,12 +10,20 @@ Flash it once and configure everything over WiFi — no re-flashing required to 
 
 ## Hardware
 
-This firmware is designed for the **SPUD v1.1** board from [Ripple Tech](https://shop.rippletech.co.nz), which features:
+This firmware is designed for the **SPUD** board from [Ripple Tech](https://shop.rippletech.co.nz), which features:
 
 - ESP32 microcontroller
-- Two MCP2517FD / MCP251863 CAN FD controllers connected via SPI
+- Two MCP251863 CAN FD controllers connected via SPI
 - 40 MHz oscillator for each CAN controller
 - Dual isolated CAN transceivers (CANH / CANL)
+
+Two CAN controller chips are supported, each with its own build environment
+(see [Building](#building)):
+
+| Controller | Build environment | Oscillator | Protocols |
+|------------|-------------------|------------|-----------|
+| **MCP251863** (SPUD, default) | `can-bridge-analyzer-mcp251863` | 40 MHz | CAN 2.0 and CAN FD |
+| **MCP2515** (classic CAN boards) | `can-bridge-analyzer-mcp2515` | 8 MHz | CAN 2.0 only |
 
 > The SPUD board is available from [shop.rippletech.co.nz](https://shop.rippletech.co.nz)
 
@@ -87,14 +95,18 @@ Toggle serial logging on/off from the web UI without rebooting.
 
 ## CAN Bus Wiring
 
-| Signal | SPUD Pin |
-|--------|----------|
-| CAN0 CANH / CANL | CAN0 connector |
-| CAN1 CANH / CANL | CAN1 connector |
+![SPUD wiring diagram](manual/images/wiring-diagram.svg)
 
-- Use **120 Ω termination resistors** at each physical end of the CAN cable.
-- With a single node on the bus, plug a 120 Ω resistor across CANH–CANL on the connector.
+| Signal | SPUD Pin (24-pin main connector) | Web UI |
+|--------|----------------------------------|--------|
+| +12V (VCC1) | 1 | – |
+| Negative (GND) | 21 | – |
+| CAN0-H / CAN0-L | 20 / 8 | Left panel |
+| CAN1-H / CAN1-L | 19 / 7 | Right panel |
+
+- Each CAN interface has 120 Ω termination jumpers. Keep them fitted when the SPUD is at the end of a bus (e.g. bridging a cut bus); remove them when tapping into the middle of a bus.
 - Maximum cable length at 500 kbps ≈ 10 m; at 1 Mbps ≈ 5 m.
+- See the [user manual](manual/README.md) for full details.
 
 ---
 

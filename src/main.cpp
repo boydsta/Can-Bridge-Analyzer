@@ -1,7 +1,8 @@
 /** @file main.cpp
     @brief CAN Bridge Analyzer — main entry point
     @details CAN bus capture, analysis, and bridging tool for the SPUD board.
-             Supports CAN 2.0 and CAN FD via MCP2517FD/MCP251863 controllers.
+             Supports CAN 2.0 and CAN FD via MCP251863 controllers, or
+             CAN 2.0 only via MCP2515 controllers (see CAN_CHIP).
              Configuration is stored in NVS and managed via the WiFi web interface.
 */
 
@@ -242,56 +243,20 @@ static bool can_init() {
     settings0.mControllerTransmitFIFORetransmissionAttempts = ACAN2517FDSettings::ThreeAttempts;
     uint32_t errorCode0 = 0;
     int can0_attempts = 0;
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Attempting CAN0 init..."); }
     while ((errorCode0 = can0.begin(settings0, can0_isr_wrapper)) != 0 && can0_attempts < 5) {
-      if (g_serial_logging && g_serial_mode == 0) {
-        Serial.print("CAN bus 0 init failed, error code: ");
-        Serial.println(errorCode0);
-        Serial.println(" Trying again...");
-      }
       can0_attempts++;
+      if (g_serial_logging && g_serial_mode == 0) {
+        Serial.printf("[CAN0] MCP251863 init failed (0x%lX), attempt %d/5\n",
+                      (unsigned long)errorCode0, can0_attempts);
+      }
       delay(500);
     }
-
-    if (errorCode0 == 0) {
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("-------------CAN0 SUCCESS-------------"); }
-      can0_success = true;
-    } else {
-      if (g_serial_logging && g_serial_mode == 0) {
-        Serial.println("-------------CAN0 FAILED - CONTINUING WITHOUT CAN-------------");
-        Serial.printf("Final error code: %u after %d attempts\n", errorCode0, can0_attempts);
-      }
-      can0_success = false;
-    }
+    can0_success = (errorCode0 == 0);
     if (g_serial_logging && g_serial_mode == 0) {
-      Serial.print("Bit Rate prescaler: ");
-      Serial.println(settings0.mBitRatePrescaler);
-      Serial.print("Arbitration Phase segment 1: ");
-      Serial.println(settings0.mArbitrationPhaseSegment1);
-      Serial.print("Arbitration Phase segment 2: ");
-      Serial.println(settings0.mArbitrationPhaseSegment2);
-      Serial.print("Arbitration SJW:");
-      Serial.println(settings0.mArbitrationSJW);
-      Serial.print("Actual Arbitration Bit Rate: ");
-      Serial.print(settings0.actualArbitrationBitRate());
-      Serial.println(" bit/s");
-      Serial.print("Exact Arbitration Bit Rate ? ");
-      Serial.println(settings0.exactArbitrationBitRate() ? "yes" : "no");
-      Serial.print("Arbitration Sample point: ");
-      Serial.print(settings0.arbitrationSamplePointFromBitStart());
-      Serial.println("%");
-      Serial.print("Data Phase segment 1: ");
-      Serial.println(settings0.mDataPhaseSegment1);
-      Serial.print("Data Phase segment 2: ");
-      Serial.println(settings0.mDataPhaseSegment2);
-      Serial.print("Data SJW:");
-      Serial.println(settings0.mDataSJW);
-      Serial.print("TDCO:");
-      Serial.println(settings0.mTDCO);
-      if (errorCode0 == 0) { Serial.println("Successful setup of CAN0"); }
+      Serial.printf("[CAN0] MCP251863 init %s at %lu bps\n",
+                    can0_success ? "succeeded" : "failed", (unsigned long)p.arb_bps);
     }
   } else {
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Skipping CAN0 setup (not enabled)."); }
     can0_success = true;
   }
 
@@ -306,59 +271,20 @@ static bool can_init() {
     settings1.mControllerTransmitFIFORetransmissionAttempts = ACAN2517FDSettings::ThreeAttempts;
     uint32_t errorCode1 = 0;
     int can1_attempts = 0;
-    const int max_can1_attempts = 5;
-
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Attempting CAN1 init..."); }
-    errorCode1 = can1.begin(settings1, can1_isr_wrapper);
-
-    while ((errorCode1 != 0) && (can1_attempts < max_can1_attempts)) {
+    while ((errorCode1 = can1.begin(settings1, can1_isr_wrapper)) != 0 && can1_attempts < 5) {
       can1_attempts++;
       if (g_serial_logging && g_serial_mode == 0) {
-        Serial.printf("CAN bus 1 init failed, error code: %u\n", errorCode1);
-        Serial.printf(" Trying again... (attempt %d/%d)\n", can1_attempts, max_can1_attempts);
+        Serial.printf("[CAN1] MCP251863 init failed (0x%lX), attempt %d/5\n",
+                      (unsigned long)errorCode1, can1_attempts);
       }
       delay(1000);
-      errorCode1 = can1.begin(settings1, can1_isr_wrapper);
     }
+    can1_success = (errorCode1 == 0);
     if (g_serial_logging && g_serial_mode == 0) {
-      Serial.println("-------------CAN1-------------");
-      Serial.print("Bit Rate prescaler: ");
-      Serial.println(settings1.mBitRatePrescaler);
-      Serial.print("Arbitration Phase segment 1: ");
-      Serial.println(settings1.mArbitrationPhaseSegment1);
-      Serial.print("Arbitration Phase segment 2: ");
-      Serial.println(settings1.mArbitrationPhaseSegment2);
-      Serial.print("Arbitration SJW:");
-      Serial.println(settings1.mArbitrationSJW);
-      Serial.print("Actual Arbitration Bit Rate: ");
-      Serial.print(settings1.actualArbitrationBitRate());
-      Serial.println(" bit/s");
-      Serial.print("Exact Arbitration Bit Rate ? ");
-      Serial.println(settings1.exactArbitrationBitRate() ? "yes" : "no");
-      Serial.print("Arbitration Sample point: ");
-      Serial.print(settings1.arbitrationSamplePointFromBitStart());
-      Serial.println("%");
-      Serial.print("Data Phase segment 1: ");
-      Serial.println(settings1.mDataPhaseSegment1);
-      Serial.print("Data Phase segment 2: ");
-      Serial.println(settings1.mDataPhaseSegment2);
-      Serial.print("Data SJW:");
-      Serial.println(settings1.mDataSJW);
-      Serial.print("TDCO:");
-      Serial.println(settings1.mTDCO);
-    }
-    if (errorCode1 == 0) {
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("-------------CAN1 SUCCESS-------------"); }
-      can1_success = true;
-    } else {
-      if (g_serial_logging && g_serial_mode == 0) {
-        Serial.println("-------------CAN1 FAILED - CONTINUING WITHOUT CAN-------------");
-        Serial.printf("Final error code: %u after %d attempts\n", errorCode1, can1_attempts);
-      }
-      can1_success = false;
+      Serial.printf("[CAN1] MCP251863 init %s at %lu bps\n",
+                    can1_success ? "succeeded" : "failed", (unsigned long)p1.arb_bps);
     }
   } else {
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Skipping CAN1 setup (not enabled)."); }
     can1_success = true;
   }
 #endif
@@ -380,14 +306,7 @@ void drain_can_rx_buffers() {
       while (can_controller_receive(can0, frame) && can0_drained < max_drain_per_call) {
         can0_drained++;
       }
-      if (can0_drained > 0) {
-        if (g_serial_logging && g_serial_mode == 0) { Serial.printf("Drained %d messages from CAN0 RX buffer\n", can0_drained); }
-        total_drained += can0_drained;
-      } else {
-        if (g_serial_logging && g_serial_mode == 0) { Serial.println("Drained 0 messages from CAN0"); }
-      }
-    } else {
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("CAN0 not active"); }
+      total_drained += can0_drained;
     }
   }
 
@@ -397,21 +316,12 @@ void drain_can_rx_buffers() {
       while (can_controller_receive(can1, frame) && can1_drained < max_drain_per_call) {
         can1_drained++;
       }
-      if (can1_drained > 0) {
-        if (g_serial_logging && g_serial_mode == 0) { Serial.printf("Drained %d messages from CAN1 RX buffer\n", can1_drained); }
-        total_drained += can1_drained;
-      } else {
-        if (g_serial_logging && g_serial_mode == 0) { Serial.println("Drained 0 messages from CAN1"); }
-      }
-    } else {
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("CAN1 not active"); }
+      total_drained += can1_drained;
     }
   }
 
-  if (total_drained > 0) {
-    if (g_serial_logging && g_serial_mode == 0) { Serial.printf("Total drained before bridge init: %d messages\n", total_drained); }
-  } else {
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("No messages to drain before bridge initialization"); }
+  if (total_drained > 0 && g_serial_logging && g_serial_mode == 0) {
+    Serial.printf("Discarded %d frames received during CAN init\n", total_drained);
   }
 }
 
@@ -579,20 +489,14 @@ void print_can_diagnostics() {
 
   if (g_cfg.can0_enable) {
     if (can0_success) { report_bus("CAN0", can0, k_bus_presets[g_bus_preset_idx].is_fd, k_bus_presets[g_bus_preset_idx].arb_bps); }
-    else {
-      Serial.println("[CAN0] Controller failed to initialise.");
-      Serial.println("[CAN0]   Check SPI wiring (MOSI/MISO/SCK/CS), 3.3V supply, and MCP2517FD power.");
-    }
+    else { Serial.println("[CAN0] Controller failed to initialise."); }
   } else {
     Serial.println("[CAN0] Disabled in config.");
   }
 
   if (g_cfg.can1_enable) {
     if (can1_success) { report_bus("CAN1", can1, k_bus_presets[g_bus_preset_idx].is_fd, k_bus_presets[g_bus_preset_idx].arb_bps); }
-    else {
-      Serial.println("[CAN1] Controller failed to initialise.");
-      Serial.println("[CAN1]   Check SPI wiring (MOSI/MISO/SCK/CS), 3.3V supply, and MCP2517FD power.");
-    }
+    else { Serial.println("[CAN1] Controller failed to initialise."); }
   } else {
     Serial.println("[CAN1] Disabled in config.");
   }
@@ -677,12 +581,8 @@ void setup() {
   if (g_serial_logging && g_serial_mode == 0) {
     Serial.println("=========================================================");
     Serial.println("CAN Bridge Analyzer");
-    Serial.println("Hardware: Rippletech SPUD v1.1");
+    Serial.println("Hardware: Rippletech SPUD");
     Serial.println("=========================================================");
-    Serial.println(ARDUINO_BOARD);
-    Serial.print(F("CPU Frequency = "));
-    Serial.print(F_CPU / 1000000);
-    Serial.println(F(" MHz"));
   }
 
   delay(5000);
@@ -699,7 +599,6 @@ void setup() {
   }
   can_init();
 
-  if (g_serial_logging && g_serial_mode == 0) { Serial.println("Draining RX buffers before bridge initialization..."); }
   delay(1000);
   drain_can_rx_buffers();
 
@@ -771,7 +670,7 @@ void setup() {
     }
     web_server = new CANWebServer(nullptr);
     web_server->begin(g_cfg.wifi_ssid, g_cfg.wifi_pass[0] ? g_cfg.wifi_pass : nullptr);
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Web server started without CAN bridge (debug mode)"); }
+    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Web server started without CAN bridge"); }
   }
   if (g_serial_logging && g_serial_mode == 0) { Serial.println("Setup complete"); }
 }

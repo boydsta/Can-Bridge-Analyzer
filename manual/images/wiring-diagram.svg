@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 950" width="1100" height="950" font-family="Arial, Helvetica, sans-serif">
+  <title>CAN Bridge Analyzer - SPUD wiring diagram</title>
+  <style>
+    .title { font-size: 24px; font-weight: bold; fill: #1a1a1a; }
+    .sub { font-size: 14px; fill: #555; }
+    .h2 { font-size: 17px; font-weight: bold; fill: #1a1a1a; }
+    .sig { font-size: 13px; font-weight: bold; text-anchor: middle; }
+    .pin { font-size: 10px; text-anchor: middle; fill: #555; }
+    .lbl { font-size: 13px; fill: #1a1a1a; }
+    .lblb { font-size: 13px; font-weight: bold; fill: #1a1a1a; }
+    .small { font-size: 11px; fill: #444; }
+    .note { font-size: 12.5px; fill: #1a1a1a; }
+    .unused rect { fill: #f7f7f7; stroke: #c8c8c8; }
+    .unused text.sig { fill: #a0a0a0; font-weight: normal; }
+    .pwr rect { fill: #fde2e2; stroke: #d32f2f; stroke-width: 2; }
+    .pwr text.sig { fill: #b71c1c; }
+    .gnd rect { fill: #dcdcdc; stroke: #222; stroke-width: 2; }
+    .gnd text.sig { fill: #111; }
+    .canh rect { fill: #fff0d6; stroke: #e08a00; stroke-width: 2; }
+    .canh text.sig { fill: #a35f00; }
+    .canl rect { fill: #dff2e6; stroke: #2e8b57; stroke-width: 2; }
+    .canl text.sig { fill: #1f6b40; }
+    .w-pwr { stroke: #d32f2f; stroke-width: 4; fill: none; }
+    .w-gnd { stroke: #222; stroke-width: 4; fill: none; }
+    .w-h { stroke: #e08a00; stroke-width: 4; fill: none; }
+    .w-l { stroke: #2e8b57; stroke-width: 4; fill: none; }
+    .box { fill: #fafafa; stroke: #333; stroke-width: 2; }
+  </style>
+
+  <rect x="0" y="0" width="1100" height="950" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="550" y="40" class="title" text-anchor="middle">CAN Bridge Analyzer - SPUD Wiring</text>
+  <text x="550" y="64" class="sub" text-anchor="middle">Only 6 pins are needed: +12V, Negative, CAN0 (H/L) and CAN1 (H/L)</text>
+
+  <!-- ===== Section 1: connector pin view ===== -->
+  <text x="150" y="100" class="h2">Main connector (24-pin Minitek Pwr 4.2 / Molex Mini-Fit Jr)</text>
+  <text x="150" y="118" class="small">Viewed looking into the male connector on the front of the SPUD, latch at top</text>
+
+  <!-- housing + latch -->
+  <rect x="154" y="134" width="792" height="116" rx="4" fill="#ffffff" stroke="#333" stroke-width="2"/>
+  <rect x="486" y="122" width="128" height="12" fill="#ffffff" stroke="#333" stroke-width="2"/>
+
+  <!-- top row: pins 24..13 -->
+  <g class="unused"><rect x="166" y="140" width="64" height="50"/><text x="198" y="164" class="sig">AI2</text><text x="198" y="182" class="pin">24</text></g>
+  <g class="unused"><rect x="230" y="140" width="64" height="50"/><text x="262" y="164" class="sig">AI1</text><text x="262" y="182" class="pin">23</text></g>
+  <g class="unused"><rect x="294" y="140" width="64" height="50"/><text x="326" y="164" class="sig">AI0</text><text x="326" y="182" class="pin">22</text></g>
+  <g class="gnd"><rect x="358" y="140" width="64" height="50"/><text x="390" y="164" class="sig">GND</text><text x="390" y="182" class="pin">21</text></g>
+  <g class="canh"><rect x="422" y="140" width="64" height="50"/><text x="454" y="164" class="sig">CAN0-H</text><text x="454" y="182" class="pin">20</text></g>
+  <g class="canh"><rect x="486" y="140" width="64" height="50"/><text x="518" y="164" class="sig">CAN1-H</text><text x="518" y="182" class="pin">19</text></g>
+  <g class="unused"><rect x="550" y="140" width="64" height="50"/><text x="582" y="164" class="sig">SW5</text><text x="582" y="182" class="pin">18</text></g>
+  <g class="unused"><rect x="614" y="140" width="64" height="50"/><text x="646" y="164" class="sig">SW4</text><text x="646" y="182" class="pin">17</text></g>
+  <g class="unused"><rect x="678" y="140" width="64" height="50"/><text x="710" y="164" class="sig">SW3</text><text x="710" y="182" class="pin">16</text></g>
+  <g class="unused"><rect x="742" y="140" width="64" height="50"/><text x="774" y="164" class="sig">SW2</text><text x="774" y="182" class="pin">15</text></g>
+  <g class="unused"><rect x="806" y="140" width="64" height="50"/><text x="838" y="164" class="sig">SW1</text><text x="838" y="182" class="pin">14</text></g>
+  <g class="unused"><rect x="870" y="140" width="64" height="50"/><text x="902" y="164" class="sig">SW0</text><text x="902" y="182" class="pin">13</text></g>
+
+  <!-- bottom row: pins 12..1 -->
+  <g class="unused"><rect x="166" y="190" width="64" height="50"/><text x="198" y="214" class="sig">AI3</text><text x="198" y="232" class="pin">12</text></g>
+  <g class="unused"><rect x="230" y="190" width="64" height="50"/><text x="262" y="214" class="sig">AI4</text><text x="262" y="232" class="pin">11</text></g>
+  <g class="unused"><rect x="294" y="190" width="64" height="50"/><text x="326" y="214" class="sig">AI5</text><text x="326" y="232" class="pin">10</text></g>
+  <g class="unused"><rect x="358" y="190" width="64" height="50"/><text x="390" y="214" class="sig">5V out</text><text x="390" y="232" class="pin">9</text></g>
+  <g class="canl"><rect x="422" y="190" width="64" height="50"/><text x="454" y="214" class="sig">CAN0-L</text><text x="454" y="232" class="pin">8</text></g>
+  <g class="canl"><rect x="486" y="190" width="64" height="50"/><text x="518" y="214" class="sig">CAN1-L</text><text x="518" y="232" class="pin">7</text></g>
+  <g class="unused"><rect x="550" y="190" width="64" height="50"/><text x="582" y="214" class="sig">DIO0</text><text x="582" y="232" class="pin">6</text></g>
+  <g class="unused"><rect x="614" y="190" width="64" height="50"/><text x="646" y="214" class="sig">DIO1</text><text x="646" y="232" class="pin">5</text></g>
+  <g class="unused"><rect x="678" y="190" width="64" height="50"/><text x="710" y="214" class="sig">DIO2</text><text x="710" y="232" class="pin">4</text></g>
+  <g class="unused"><rect x="742" y="190" width="64" height="50"/><text x="774" y="214" class="sig">DIO3</text><text x="774" y="232" class="pin">3</text></g>
+  <g class="unused"><rect x="806" y="190" width="64" height="50"/><text x="838" y="214" class="sig">VCC2</text><text x="838" y="232" class="pin">2</text></g>
+  <g class="pwr"><rect x="870" y="190" width="64" height="50"/><text x="902" y="214" class="sig">VCC1</text><text x="902" y="232" class="pin">1</text></g>
+
+  <!-- legend -->
+  <g transform="translate(0,280)">
+    <rect x="196" y="-12" width="16" height="16" fill="#fde2e2" stroke="#d32f2f" stroke-width="2"/><text x="220" y="1" class="lbl">+12V (VCC1)</text>
+    <rect x="336" y="-12" width="16" height="16" fill="#dcdcdc" stroke="#222" stroke-width="2"/><text x="360" y="1" class="lbl">Negative (GND)</text>
+    <rect x="496" y="-12" width="16" height="16" fill="#fff0d6" stroke="#e08a00" stroke-width="2"/><text x="520" y="1" class="lbl">CAN High</text>
+    <rect x="616" y="-12" width="16" height="16" fill="#dff2e6" stroke="#2e8b57" stroke-width="2"/><text x="640" y="1" class="lbl">CAN Low</text>
+    <rect x="730" y="-12" width="16" height="16" fill="#f7f7f7" stroke="#c8c8c8"/><text x="754" y="1" class="lbl">Not connected</text>
+  </g>
+
+  <line x1="40" y1="320" x2="1060" y2="320" stroke="#ddd" stroke-width="1"/>
+
+  <!-- ===== Section 2: wiring schematic ===== -->
+  <text x="60" y="360" class="h2">Wiring</text>
+
+  <!-- Power supply -->
+  <rect x="60" y="430" width="180" height="140" rx="6" class="box"/>
+  <text x="150" y="490" class="lblb" text-anchor="middle">12 V supply</text>
+  <text x="150" y="510" class="small" text-anchor="middle">vehicle / bench PSU</text>
+  <text x="226" y="475" class="lblb" text-anchor="middle" fill="#d32f2f">+</text>
+  <text x="226" y="536" class="lblb" text-anchor="middle">−</text>
+
+  <!-- +12V wire with fuse -->
+  <path d="M240,470 H300" class="w-pwr"/>
+  <rect x="300" y="461" width="50" height="18" rx="3" fill="#fff" stroke="#d32f2f" stroke-width="2"/>
+  <line x1="306" y1="470" x2="344" y2="470" stroke="#d32f2f" stroke-width="1.5"/>
+  <text x="325" y="452" class="small" text-anchor="middle">2 A fuse</text>
+  <path d="M350,470 H380" class="w-pwr"/>
+  <circle cx="380" cy="470" r="5" fill="#d32f2f"/>
+
+  <!-- GND wire -->
+  <path d="M240,530 H380" class="w-gnd"/>
+  <circle cx="380" cy="530" r="5" fill="#222"/>
+  <text x="310" y="520" class="small" text-anchor="middle">Negative</text>
+
+  <!-- SPUD box -->
+  <rect x="380" y="420" width="340" height="220" rx="8" class="box"/>
+  <text x="590" y="462" class="lblb" text-anchor="middle" font-size="16">SPUD</text>
+  <text x="590" y="482" class="small" text-anchor="middle">ESP32 + 2 × CAN-FD controller</text>
+  <text x="590" y="500" class="small" text-anchor="middle">CAN Bridge Analyzer firmware</text>
+  <text x="392" y="474" class="lbl">VCC1 · pin 1</text>
+  <text x="392" y="534" class="lbl">GND · pin 21</text>
+
+  <text x="460" y="590" class="small" text-anchor="middle">CAN0</text>
+  <text x="460" y="604" class="small" text-anchor="middle">(120 Ω jumpers)</text>
+  <text x="640" y="590" class="small" text-anchor="middle">CAN1</text>
+  <text x="640" y="604" class="small" text-anchor="middle">(120 Ω jumpers)</text>
+  <text x="430" y="630" class="pin">20</text>
+  <text x="490" y="630" class="pin">8</text>
+  <text x="610" y="630" class="pin">19</text>
+  <text x="670" y="630" class="pin">7</text>
+
+  <!-- CAN0 wires -->
+  <path d="M430,640 V740" class="w-h"/>
+  <path d="M490,640 V740" class="w-l"/>
+  <circle cx="430" cy="640" r="5" fill="#e08a00"/>
+  <circle cx="490" cy="640" r="5" fill="#2e8b57"/>
+  <text transform="translate(424,690) rotate(-90)" class="small" text-anchor="middle">CAN0-H</text>
+  <text transform="translate(508,690) rotate(-90)" class="small" text-anchor="middle">CAN0-L</text>
+
+  <!-- CAN1 wires -->
+  <path d="M610,640 V740" class="w-h"/>
+  <path d="M670,640 V740" class="w-l"/>
+  <circle cx="610" cy="640" r="5" fill="#e08a00"/>
+  <circle cx="670" cy="640" r="5" fill="#2e8b57"/>
+  <text transform="translate(604,690) rotate(-90)" class="small" text-anchor="middle">CAN1-H</text>
+  <text transform="translate(688,690) rotate(-90)" class="small" text-anchor="middle">CAN1-L</text>
+
+  <text x="550" y="695" class="small" text-anchor="middle" font-style="italic">twisted pairs</text>
+
+  <!-- Bus A -->
+  <rect x="280" y="740" width="240" height="90" rx="6" fill="#eef4fb" stroke="#2b6cb0" stroke-width="2"/>
+  <text x="400" y="770" class="lblb" text-anchor="middle">Bus A → CAN0</text>
+  <text x="400" y="792" class="lbl" text-anchor="middle" fill="#2b6cb0">Web UI: LEFT panel</text>
+  <text x="400" y="812" class="small" text-anchor="middle">e.g. vehicle harness side</text>
+
+  <!-- Bus B -->
+  <rect x="560" y="740" width="240" height="90" rx="6" fill="#f5eefb" stroke="#7b3fb0" stroke-width="2"/>
+  <text x="680" y="770" class="lblb" text-anchor="middle">Bus B → CAN1</text>
+  <text x="680" y="792" class="lbl" text-anchor="middle" fill="#7b3fb0">Web UI: RIGHT panel</text>
+  <text x="680" y="812" class="small" text-anchor="middle">e.g. ECU / module side</text>
+
+  <!-- Notes -->
+  <rect x="770" y="380" width="300" height="300" rx="6" fill="#fffdf2" stroke="#c9b458" stroke-width="1.5"/>
+  <text x="786" y="406" class="lblb">Notes</text>
+  <text x="786" y="432" class="note">• Pin 2 (VCC2) not needed - it only</text>
+  <text x="798" y="449" class="note">feeds switches SW3-SW5.</text>
+  <text x="786" y="473" class="note">• Pin 9 (5V) is an output - leave it</text>
+  <text x="798" y="490" class="note">unconnected.</text>
+  <text x="786" y="514" class="note">• Bridging a cut bus: SPUD is the end</text>
+  <text x="798" y="531" class="note">of both segments - keep both pairs</text>
+  <text x="798" y="548" class="note">of 120 Ω termination jumpers fitted.</text>
+  <text x="786" y="572" class="note">• Tapping mid-bus (listen only): remove</text>
+  <text x="798" y="589" class="note">that interface's jumpers.</text>
+  <text x="786" y="613" class="note">• Check: ~60 Ω between CANH and CANL</text>
+  <text x="798" y="630" class="note">with power off.</text>
+  <text x="786" y="654" class="note">• H to H, L to L. Use twisted pair.</text>
+
+  <!-- Web UI strip -->
+  <text x="550" y="872" class="lblb" text-anchor="middle">Web dashboard (http://192.168.1.1)</text>
+  <rect x="150" y="884" width="260" height="40" fill="#eef4fb" stroke="#2b6cb0" stroke-width="2"/>
+  <text x="280" y="909" class="lbl" text-anchor="middle">LEFT panel = CAN0 (CAN0→CAN1)</text>
+  <rect x="410" y="884" width="280" height="40" fill="#f7f7f7" stroke="#999" stroke-width="2"/>
+  <text x="550" y="909" class="lbl" text-anchor="middle" fill="#666">Centre: message analysis</text>
+  <rect x="690" y="884" width="260" height="40" fill="#f5eefb" stroke="#7b3fb0" stroke-width="2"/>
+  <text x="820" y="909" class="lbl" text-anchor="middle">RIGHT panel = CAN1 (CAN1→CAN0)</text>
+</svg>

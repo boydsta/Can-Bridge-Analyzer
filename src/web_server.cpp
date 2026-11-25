@@ -127,10 +127,8 @@ void CANWebServer::begin(const char* ssid, const char* password) {
             String id_str = request->getParam("id")->value();
             uint32_t can_id = strtoul(id_str.c_str(), nullptr, 16);
             
-            //Serial.printf("API request for payload detail: ID=%s (0x%X)\n", id_str.c_str(), can_id);
             
             String payload_detail = get_selected_payload_detail(can_id);
-            //Serial.printf("Payload detail response: %s\n", payload_detail.c_str());
             
             request->send(200, "application/json", payload_detail);
         } else {
@@ -793,8 +791,6 @@ void CANWebServer::sendCANDataToClients() {
         // Use lightweight ID summary instead of full data for WebSocket
         String json_data = get_can_ids_summary();
         
-        // Add debug logging
-        // Serial.printf("Sending WebSocket data: %s\n", json_data.c_str());
         
         // Check each client individually and drop data if their queue is full
         ws.cleanupClients();

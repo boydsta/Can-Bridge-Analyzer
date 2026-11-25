@@ -4,42 +4,9 @@
 
 #include "can_bridge.h"
 
-/**
- * @brief Print CAN controller diagnostics to Serial.
- * @param can  Pointer to ACAN2517FD instance.
- * @param name Label for this controller.
- */
-void print_can_diagnostics(CANController* can, const char* name) {
-  if (!can) return;
-
-#if CAN_CHIP == MCP2515
-  if (g_serial_logging && g_serial_mode == 0) {
-    Serial.printf("  TX errors: %u, RX errors: %u\n",
-                  can->errorCountTX(), can->errorCountRX());
-    Serial.println("========================");
-  }
-#else
-  uint32_t counters = can->errorCounters();
-  uint8_t tx_err = (counters >> 8) & 0xFF;
-  uint8_t rx_err = counters & 0xFF;
-  if (g_serial_logging && g_serial_mode == 0) {
-    Serial.printf("  TX error counter: %u, RX error counter: %u\n", tx_err, rx_err);
-    Serial.printf("  TX buffer count: %lu, peak: %lu\n",
-      can->driverTransmitBufferCount(),
-      can->driverTransmitBufferPeakCount());
-    Serial.printf("  RX buffer peak: %lu\n", can->driverReceiveBufferPeakCount());
-    Serial.printf("  RX buffer overflow count: %u\n", can->hardwareReceiveBufferOverflowCount());
-    Serial.printf("  DIAG0: 0x%08lX\n", can->diagInfos(0));
-    Serial.printf("  DIAG1: 0x%08lX\n", can->diagInfos(1));
-    Serial.printf("  TX buffer size: %lu\n", can->driverTransmitBufferSize());
-    Serial.println("========================");
-  }
-#endif
-}
-
 CANBridge::CANBridge(CANController* rx_can, CANController* tx_can)
     : can_rx(rx_can), can_tx(tx_can), last_update(0),
-      message_count(0), forwarded_count(0), blocked_count(0) {
+      message_count(0), forwarded_count(0), blocked_count(0), failed_count(0) {
 }
 
 void CANBridge::begin() {
@@ -68,20 +35,12 @@ void CANBridge::onMessageReceived(const CANFrame& frame, uint8_t bus_id) {
                      TX FIFO stays blocked until the ESP32 is reset. */
                   can_controller_recover(*can_rx);
                   can_controller_recover(*can_tx);
-                  if (g_serial_logging && g_serial_mode == 0) {
-                    Serial.printf("Failed to send from CAN0\n");
-                    print_can_diagnostics(can_tx, "CAN0");
-                  }
                 }
             } else if (bus_id == 1) {
                 forwarded = can_controller_send(*can_rx, frame);
                 if (!forwarded) {
                   can_controller_recover(*can_rx);
                   can_controller_recover(*can_tx);
-                  if (g_serial_logging && g_serial_mode == 0) {
-                    Serial.printf("Failed to send from CAN1\n");
-                    print_can_diagnostics(can_rx, "CAN1");
-                  }
                 }
             }
         }
@@ -89,11 +48,10 @@ void CANBridge::onMessageReceived(const CANFrame& frame, uint8_t bus_id) {
         if (forwarded) {
             forwarded_count++;
         } else if (can_tx != nullptr) {
-            if (g_serial_logging && g_serial_mode == 0) { Serial.printf("Failed to forward CAN ID: 0x%03X from bus %d\n", frame.id, bus_id); }
+            failed_count++;  /* reported in the periodic bridge stats */
         }
     } else {
-        blocked_count++;
-        if (g_serial_logging && g_serial_mode == 0) { Serial.printf("Blocked CAN ID: 0x%03X from bus %d\n", frame.id, bus_id); }
+        blocked_count++;  /* reported in the periodic bridge stats */
     }
 }
 
@@ -130,8 +88,8 @@ void CANBridge::update() {
         static unsigned long last_stats = 0;
         if (now - last_stats >= 10000) {
             if (g_serial_logging && g_serial_mode == 0) {
-              Serial.printf("Bridge Stats: %u total, %u forwarded, %u blocked\n",
-                           message_count, forwarded_count, blocked_count);
+              Serial.printf("Bridge Stats: %u total, %u forwarded, %u blocked, %u failed to forward\n",
+                           message_count, forwarded_count, blocked_count, failed_count);
               Serial.printf("Active CAN IDs: %u, Total messages: %u\n",
                            analysis.getActiveCAN_IDCount(), analysis.getTotalMessages());
             }
@@ -147,6 +105,7 @@ void CANBridge::printAnalysisStats() {
       Serial.printf("  Total messages: %u\n", message_count);
       Serial.printf("  Forwarded: %u\n", forwarded_count);
       Serial.printf("  Blocked: %u\n", blocked_count);
+      Serial.printf("  Failed to forward: %u\n", failed_count);
       Serial.printf("Analysis Engine:\n");
       Serial.printf("  Active CAN IDs: %u\n", analysis.getActiveCAN_IDCount());
       Serial.printf("  Total messages: %u\n", analysis.getTotalMessages());

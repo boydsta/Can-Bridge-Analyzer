@@ -217,7 +217,6 @@ String CANAnalysis::getJSONData() {
     }
 
     json += "]}";
-    //Serial.println(json);
 
     cached_json = json;
     last_json_update = now;

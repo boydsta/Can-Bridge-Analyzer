@@ -80,6 +80,7 @@ private:
     uint32_t message_count;
     uint32_t forwarded_count;
     uint32_t blocked_count;
+    uint32_t failed_count;   //!< Frames that could not be sent on the other bus
 
     std::vector<uint32_t> blocked_ids;
 
