@@ -86,7 +86,7 @@
   <!-- Power supply -->
   <rect x="60" y="430" width="180" height="140" rx="6" class="box"/>
   <text x="150" y="490" class="lblb" text-anchor="middle">12 V supply</text>
-  <text x="150" y="510" class="small" text-anchor="middle">vehicle / bench PSU</text>
+  <text x="150" y="510" class="small" text-anchor="middle">battery / bench PSU</text>
   <text x="226" y="475" class="lblb" text-anchor="middle" fill="#d32f2f">+</text>
   <text x="226" y="536" class="lblb" text-anchor="middle">−</text>
 
@@ -106,7 +106,7 @@
   <!-- SPUD box -->
   <rect x="380" y="420" width="340" height="220" rx="8" class="box"/>
   <text x="590" y="462" class="lblb" text-anchor="middle" font-size="16">SPUD</text>
-  <text x="590" y="482" class="small" text-anchor="middle">ESP32 + 2 × CAN-FD controller</text>
+  <!-- <text x="590" y="482" class="small" text-anchor="middle">ESP32 + 2 × CAN controller</text> -->
   <text x="590" y="500" class="small" text-anchor="middle">CAN Bridge Analyzer firmware</text>
   <text x="392" y="474" class="lbl">VCC1 · pin 1</text>
   <text x="392" y="534" class="lbl">GND · pin 21</text>
@@ -151,20 +151,23 @@
   <text x="680" y="812" class="small" text-anchor="middle">e.g. ECU / module side</text>
 
   <!-- Notes -->
-  <rect x="770" y="380" width="300" height="300" rx="6" fill="#fffdf2" stroke="#c9b458" stroke-width="1.5"/>
+  <rect x="770" y="380" width="300" height="345" rx="6" fill="#fffdf2" stroke="#c9b458" stroke-width="1.5"/>
   <text x="786" y="406" class="lblb">Notes</text>
   <text x="786" y="432" class="note">• Pin 2 (VCC2) not needed - it only</text>
   <text x="798" y="449" class="note">feeds switches SW3-SW5.</text>
   <text x="786" y="473" class="note">• Pin 9 (5V) is an output - leave it</text>
   <text x="798" y="490" class="note">unconnected.</text>
-  <text x="786" y="514" class="note">• Bridging a cut bus: SPUD is the end</text>
+  <text x="786" y="514" class="note">• Bridging a bus backbone: SPUD is the end</text>
   <text x="798" y="531" class="note">of both segments - keep both pairs</text>
   <text x="798" y="548" class="note">of 120 Ω termination jumpers fitted.</text>
-  <text x="786" y="572" class="note">• Tapping mid-bus (listen only): remove</text>
-  <text x="798" y="589" class="note">that interface's jumpers.</text>
-  <text x="786" y="613" class="note">• Check: ~60 Ω between CANH and CANL</text>
-  <text x="798" y="630" class="note">with power off.</text>
-  <text x="786" y="654" class="note">• H to H, L to L. Use twisted pair.</text>
+  <text x="786" y="574" class="note">• Bridging a bus branch: Add termination</text>
+  <text x="798" y="598" class="note">jumpers on the branch side. Test resistance</text>
+  <text x="798" y="622" class="note">of the network side first (add if 120 Ω).</text>
+  <text x="786" y="646" class="note">• Tapping mid-bus (listen only): remove</text>
+  <text x="798" y="670" class="note">that interface's jumpers.</text>
+  <text x="786" y="694" class="note">• Check: ~60 Ω between CANH and CANL</text>
+  <text x="798" y="718" class="note">with power off.</text>
+  <!-- <text x="786" y="742" class="note">• H to H, L to L. Use twisted pair.</text> -->
 
   <!-- Web UI strip -->
   <text x="550" y="872" class="lblb" text-anchor="middle">Web dashboard (http://192.168.1.1)</text>
