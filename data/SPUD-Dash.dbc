@@ -10,7 +10,7 @@ BU_: VCU Dash
  *  SPUD Dash ↔ VCU private CAN bus
  *  All frames 8 bytes, Intel (little-endian) byte order.
  *  Signal bit positions are LSB for @1 (Intel) signals.
- *  Source: can_ids.h in the Can-Bridge-Analyzer project.
+ *  Part of the CAN Bridge Analyzer project (MIT License).
  * ============================================================ */
 
 BO_ 1562 DASH_STATUS: 8 Dash

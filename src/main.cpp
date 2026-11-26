@@ -4,6 +4,11 @@
              Supports CAN 2.0 and CAN FD via MCP251863 controllers, or
              CAN 2.0 only via MCP2515 controllers (see CAN_CHIP).
              Configuration is stored in NVS and managed via the WiFi web interface.
+
+    Portions (CAN controller selection macros, can_init(), print_can_mesg(),
+    handle_incoming_can()) are derived from examples/can-logging/src/main.cpp in
+    spud-diy (https://github.com/racleave/spud-diy),
+    Copyright (c) 2024 Ra Cleave, MIT License — see the full notice in spud.h.
 */
 
 #include <Arduino.h>

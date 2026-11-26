@@ -72,6 +72,7 @@ private:
     String generateDBCPage();
     String generateTxPage();
     String generateMarkersPage();
+    String generateLicensesPage();
 
     String get_can_ids_summary();
     String get_selected_payload_detail(uint32_t can_id);

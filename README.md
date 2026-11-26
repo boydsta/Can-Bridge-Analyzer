@@ -199,8 +199,11 @@ local ESP32 stability fixes — see [`PATCHES.md`](lib/ACAN2517FD/PATCHES.md).
 
 ## License
 
-Firmware: MIT — see [LICENSE](LICENSE).
+Firmware: MIT — see [LICENSE](LICENSE). Full list of third-party components
+and their licenses (including the LGPL libraries linked into the firmware):
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
+- `src/spud.h` and parts of `src/main.cpp` — MIT, © 2024 Ra Cleave, derived from [racleave/spud-diy](https://github.com/racleave/spud-diy) (notice kept in `src/spud.h`)
 - `lib/ACAN2517FD` — MIT, © Pierre Molinaro (see its `LICENSE`)
 - Nissan Leaf DBC files in `data/` — GPL-3.0, from [dalathegreat/leaf_can_bus_messages](https://github.com/dalathegreat/leaf_can_bus_messages) (forked from [baradhili/leaf_can_bus_messages](https://github.com/baradhili/leaf_can_bus_messages))
 
