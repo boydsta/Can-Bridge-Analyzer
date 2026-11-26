@@ -1005,7 +1005,7 @@ const char* CANWebServer::generateMainPage() {
     <div class="header-bar">
         <div class="header-left">
             <span class="tool-name">CAN REVERSE ENGINEERING</span>
-            <span class="tool-version" style="color:#7f8c8d;font-size:10px;font-weight:400">v0.3.0</span>
+            <span class="tool-version" style="color:#7f8c8d;font-size:10px;font-weight:400">v)html" FW_VERSION R"html(</span>
             <span class="status">
                 <span id="connection-status">○</span> WebSocket
             </span>

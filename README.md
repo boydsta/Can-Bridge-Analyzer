@@ -1,6 +1,6 @@
 # CAN Bridge Analyzer
 
-**v0.3.0** · [Changelog](CHANGELOG.md)
+**v0.4.0** · [Changelog](CHANGELOG.md)
 
 A dual-bus CAN 2.0 / CAN FD capture, analysis, and bridging tool for the **SPUD** DIY controller board by [Ripple Tech](https://shop.rippletech.co.nz).
 

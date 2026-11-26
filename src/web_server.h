@@ -17,7 +17,7 @@
 #include "marker_plan.h"
 
 /** @brief Firmware version shown on the OTA page (/update). Keep in step with the README. */
-#define FW_VERSION "0.3.0"
+#define FW_VERSION "0.4.0"
 
 /**
  * @brief Web server for the CAN Bridge Analyzer interface.

@@ -1,12 +1,5 @@
 # In-box Open Source Notice (pre-flashed boards)
 
-Print this on the quick-start card or packing slip for every SPUD board
-shipped with CAN Bridge Analyzer firmware installed. It provides the notice
-and the 3-year written offer for source code required by GPL-3.0 §6(b),
-LGPL-3.0 §4 and LGPL-2.1 §6(b).
-
-Before printing, replace `<CONTACT>` with a real email or postal address.
-
 ---
 
 **Open Source Software Notice**
@@ -28,18 +21,10 @@ and commit are shown on the /licenses page). In addition, for at least three
 (3) years from the date you received this product, we will provide a complete
 machine-readable copy of the corresponding source code for no more than the
 cost of physically performing the distribution. To request a copy, contact
-`<CONTACT>` and quote your firmware version.
+info@rippletech.co.nz and quote your firmware version.
 
 You may modify and reinstall the firmware over USB or at
 http://192.168.1.1/update.
 
 ---
 
-## Release checklist for shipped firmware
-
-1. Commit everything, so the /licenses page doesn't show a `-dirty` commit.
-2. Tag the release (e.g. `v0.3.0`) and create a GitHub Release.
-3. Attach a complete source archive that includes the PlatformIO library
-   snapshots (`.pio/libdeps/<env>/`), so the source stays available for the
-   3-year offer even if an upstream repo changes or disappears.
-4. Flash boards with that tagged build and print this card.
