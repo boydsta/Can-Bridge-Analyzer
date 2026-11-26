@@ -39,15 +39,12 @@
 
   <!-- housing + latch -->
   <rect x="154" y="134" width="792" height="116" rx="4" fill="#ffffff" stroke="#333" stroke-width="2"/>
-  <rect x="486" y="122" width="128" height="12" fill="#ffffff" stroke="#333" stroke-width="2"/>
+  <rect x="502" y="122" width="96" height="12" fill="#ffffff" stroke="#333" stroke-width="2"/>
 
   <!-- top row: pins 24..13 -->
   <g class="unused"><rect x="166" y="140" width="64" height="50"/><text x="198" y="164" class="sig">AI2</text><text x="198" y="182" class="pin">24</text></g>
   <g class="unused"><rect x="230" y="140" width="64" height="50"/><text x="262" y="164" class="sig">AI1</text><text x="262" y="182" class="pin">23</text></g>
   <g class="unused"><rect x="294" y="140" width="64" height="50"/><text x="326" y="164" class="sig">AI0</text><text x="326" y="182" class="pin">22</text></g>
-  <g class="gnd"><rect x="358" y="140" width="64" height="50"/><text x="390" y="164" class="sig">GND</text><text x="390" y="182" class="pin">21</text></g>
-  <g class="canh"><rect x="422" y="140" width="64" height="50"/><text x="454" y="164" class="sig">CAN0-H</text><text x="454" y="182" class="pin">20</text></g>
-  <g class="canh"><rect x="486" y="140" width="64" height="50"/><text x="518" y="164" class="sig">CAN1-H</text><text x="518" y="182" class="pin">19</text></g>
   <g class="unused"><rect x="550" y="140" width="64" height="50"/><text x="582" y="164" class="sig">SW5</text><text x="582" y="182" class="pin">18</text></g>
   <g class="unused"><rect x="614" y="140" width="64" height="50"/><text x="646" y="164" class="sig">SW4</text><text x="646" y="182" class="pin">17</text></g>
   <g class="unused"><rect x="678" y="140" width="64" height="50"/><text x="710" y="164" class="sig">SW3</text><text x="710" y="182" class="pin">16</text></g>
@@ -60,13 +57,19 @@
   <g class="unused"><rect x="230" y="190" width="64" height="50"/><text x="262" y="214" class="sig">AI4</text><text x="262" y="232" class="pin">11</text></g>
   <g class="unused"><rect x="294" y="190" width="64" height="50"/><text x="326" y="214" class="sig">AI5</text><text x="326" y="232" class="pin">10</text></g>
   <g class="unused"><rect x="358" y="190" width="64" height="50"/><text x="390" y="214" class="sig">5V out</text><text x="390" y="232" class="pin">9</text></g>
-  <g class="canl"><rect x="422" y="190" width="64" height="50"/><text x="454" y="214" class="sig">CAN0-L</text><text x="454" y="232" class="pin">8</text></g>
-  <g class="canl"><rect x="486" y="190" width="64" height="50"/><text x="518" y="214" class="sig">CAN1-L</text><text x="518" y="232" class="pin">7</text></g>
   <g class="unused"><rect x="550" y="190" width="64" height="50"/><text x="582" y="214" class="sig">DIO0</text><text x="582" y="232" class="pin">6</text></g>
   <g class="unused"><rect x="614" y="190" width="64" height="50"/><text x="646" y="214" class="sig">DIO1</text><text x="646" y="232" class="pin">5</text></g>
   <g class="unused"><rect x="678" y="190" width="64" height="50"/><text x="710" y="214" class="sig">DIO2</text><text x="710" y="232" class="pin">4</text></g>
   <g class="unused"><rect x="742" y="190" width="64" height="50"/><text x="774" y="214" class="sig">DIO3</text><text x="774" y="232" class="pin">3</text></g>
   <g class="unused"><rect x="806" y="190" width="64" height="50"/><text x="838" y="214" class="sig">VCC2</text><text x="838" y="232" class="pin">2</text></g>
+
+  <!-- Put the used pins afterwad to fix the borders. -->
+  <g class="gnd"><rect x="358" y="140" width="64" height="50"/><text x="390" y="164" class="sig">GND</text><text x="390" y="182" class="pin">21</text></g>
+  <g class="canh"><rect x="422" y="140" width="64" height="50"/><text x="454" y="164" class="sig">CAN0-H</text><text x="454" y="182" class="pin">20</text></g>
+  <g class="canh"><rect x="486" y="140" width="64" height="50"/><text x="518" y="164" class="sig">CAN1-H</text><text x="518" y="182" class="pin">19</text></g>
+
+  <g class="canl"><rect x="422" y="190" width="64" height="50"/><text x="454" y="214" class="sig">CAN0-L</text><text x="454" y="232" class="pin">8</text></g>
+  <g class="canl"><rect x="486" y="190" width="64" height="50"/><text x="518" y="214" class="sig">CAN1-L</text><text x="518" y="232" class="pin">7</text></g>
   <g class="pwr"><rect x="870" y="190" width="64" height="50"/><text x="902" y="214" class="sig">VCC1</text><text x="902" y="232" class="pin">1</text></g>
 
   <!-- legend -->
@@ -86,7 +89,7 @@
   <!-- Power supply -->
   <rect x="60" y="430" width="180" height="140" rx="6" class="box"/>
   <text x="150" y="490" class="lblb" text-anchor="middle">12 V supply</text>
-  <text x="150" y="510" class="small" text-anchor="middle">vehicle / bench PSU</text>
+  <text x="150" y="510" class="small" text-anchor="middle">battery / bench PSU</text>
   <text x="226" y="475" class="lblb" text-anchor="middle" fill="#d32f2f">+</text>
   <text x="226" y="536" class="lblb" text-anchor="middle">−</text>
 
@@ -106,7 +109,7 @@
   <!-- SPUD box -->
   <rect x="380" y="420" width="340" height="220" rx="8" class="box"/>
   <text x="590" y="462" class="lblb" text-anchor="middle" font-size="16">SPUD</text>
-  <text x="590" y="482" class="small" text-anchor="middle">ESP32 + 2 × CAN-FD controller</text>
+  <!-- <text x="590" y="482" class="small" text-anchor="middle">ESP32 + 2 × CAN controller</text> -->
   <text x="590" y="500" class="small" text-anchor="middle">CAN Bridge Analyzer firmware</text>
   <text x="392" y="474" class="lbl">VCC1 · pin 1</text>
   <text x="392" y="534" class="lbl">GND · pin 21</text>
@@ -151,20 +154,23 @@
   <text x="680" y="812" class="small" text-anchor="middle">e.g. ECU / module side</text>
 
   <!-- Notes -->
-  <rect x="770" y="380" width="300" height="300" rx="6" fill="#fffdf2" stroke="#c9b458" stroke-width="1.5"/>
+  <rect x="770" y="380" width="300" height="345" rx="6" fill="#fffdf2" stroke="#c9b458" stroke-width="1.5"/>
   <text x="786" y="406" class="lblb">Notes</text>
   <text x="786" y="432" class="note">• Pin 2 (VCC2) not needed - it only</text>
   <text x="798" y="449" class="note">feeds switches SW3-SW5.</text>
   <text x="786" y="473" class="note">• Pin 9 (5V) is an output - leave it</text>
   <text x="798" y="490" class="note">unconnected.</text>
-  <text x="786" y="514" class="note">• Bridging a cut bus: SPUD is the end</text>
+  <text x="786" y="514" class="note">• Bridging a bus backbone: SPUD is the end</text>
   <text x="798" y="531" class="note">of both segments - keep both pairs</text>
   <text x="798" y="548" class="note">of 120 Ω termination jumpers fitted.</text>
-  <text x="786" y="572" class="note">• Tapping mid-bus (listen only): remove</text>
-  <text x="798" y="589" class="note">that interface's jumpers.</text>
-  <text x="786" y="613" class="note">• Check: ~60 Ω between CANH and CANL</text>
-  <text x="798" y="630" class="note">with power off.</text>
-  <text x="786" y="654" class="note">• H to H, L to L. Use twisted pair.</text>
+  <text x="786" y="574" class="note">• Bridging a bus branch: Add termination</text>
+  <text x="798" y="598" class="note">jumpers on the branch side. Test resistance</text>
+  <text x="798" y="622" class="note">of the network side first (add if 120 Ω).</text>
+  <text x="786" y="646" class="note">• Tapping mid-bus (listen only): remove</text>
+  <text x="798" y="670" class="note">that interface's jumpers.</text>
+  <text x="786" y="694" class="note">• Check: ~60 Ω between CANH and CANL</text>
+  <text x="798" y="718" class="note">with power off.</text>
+  <!-- <text x="786" y="742" class="note">• H to H, L to L. Use twisted pair.</text> -->
 
   <!-- Web UI strip -->
   <text x="550" y="872" class="lblb" text-anchor="middle">Web dashboard (http://192.168.1.1)</text>
