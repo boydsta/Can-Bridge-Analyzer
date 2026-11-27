@@ -60,11 +60,15 @@ After booting, the device creates a WiFi access point:
 | SSID     | `CanBridgeAnalyzer` |
 | Password | `canbus123`         |
 
-Connect your phone or laptop to this network.
+Connect your laptop or PC to this network.
 
 ### 3. Open the web interface
 
-Navigate to **http://192.168.1.1** in any browser.
+Navigate to **http://192.168.1.1** in a current browser (Chrome, Edge or Firefox).
+
+> **A laptop or PC is required.** The analyser interface is too detailed for a
+> phone screen. A large tablet in landscape may work. The Config, firmware
+> update and licence pages can be used from a phone.
 
 ### 4. Configure the device
 
@@ -132,7 +136,10 @@ Connect a USB serial monitor at **115200 baud**.
 | 1 — SavvyCAN CSV | Save output to `.csv` and import via *File → Load Log File → GVRET Logs* |
 | 2 — Binary GVRET | Live connection in SavvyCAN via *Add New Device → GVRET Serial* |
 
-Toggle serial logging on/off from the web UI without rebooting.
+The format is set on the Config page and applies without rebooting. Both buses
+are logged; TX Scheduler frames are marked `Tx`.
+Start and stop logging with the **Serial Log** button on the dashboard; in
+GVRET mode it starts automatically when SavvyCAN connects.
 
 ---
 

@@ -179,5 +179,5 @@
   <rect x="410" y="884" width="280" height="40" fill="#f7f7f7" stroke="#999" stroke-width="2"/>
   <text x="550" y="909" class="lbl" text-anchor="middle" fill="#666">Centre: message analysis</text>
   <rect x="690" y="884" width="260" height="40" fill="#f5eefb" stroke="#7b3fb0" stroke-width="2"/>
-  <text x="820" y="909" class="lbl" text-anchor="middle">RIGHT panel = CAN1 (CAN1→CAN0)</text>
+  <text x="820" y="909" class="lbl" text-anchor="middle">RIGHT panel = CAN1 (CAN0←CAN1)</text>
 </svg>

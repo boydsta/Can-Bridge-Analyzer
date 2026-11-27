@@ -79,7 +79,10 @@ void TxScheduler::run() {
                        is dropped for this cycle. Do not hold the mutex across
                        SPI — release first, re-acquire. */
                     xSemaphoreGive(mutex);
-                    can_controller_send(*ctrl, frame);
+                    uint8_t bus = e.bus < 2 ? e.bus : 0;
+                    if (can_controller_send(*ctrl, frame) && serial_log_frames()) {
+                        print_can_mesg(bus, frame.id, frame.len, frame.data, /* tx= */ true);
+                    }
                     xSemaphoreTake(mutex, portMAX_DELAY);
                 }
             }
@@ -231,7 +234,9 @@ void TxScheduler::save() const {
 
 void TxScheduler::load() {
     Preferences prefs;
-    prefs.begin(TX_SCHED_NVS_NS, true);
+    /* Read-write so a never-saved namespace is created rather than logging
+       "nvs_open failed: NOT_FOUND" on every boot. Only reads happen here. */
+    prefs.begin(TX_SCHED_NVS_NS, /* readOnly= */ false);
     uint8_t cnt = prefs.getUChar("count", 0);
     if (cnt > TX_SCHED_MAX_ENTRIES) cnt = TX_SCHED_MAX_ENTRIES;
 

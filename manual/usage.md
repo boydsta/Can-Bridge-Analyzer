@@ -70,7 +70,24 @@ Click a row to see its ID, DLC, period and count, plus a byte view:
 
 The header shows the WebSocket connection, whether CAN data is arriving, the
 total message count, and the **⬤ Serial Log** toggle. It also links to the other
-pages: Config, DBC, TX Sched, Markers and OTA.
+pages: TX Sched, Markers and Config (far right).
+
+Each bus panel heading has a status badge (hover over it for the error
+counters):
+
+| Badge | Meaning |
+|-------|---------|
+| 🟢 **Live** | Frames received in the last 3 s |
+| 🟠 **Live · errors** | Receiving, but with errors. Check termination and speed |
+| 🟠 **No ACK** | Frames sent to this bus aren't acknowledged. Usually nothing is connected |
+| 🟠 **RX errors** | Corrupted frames. Usually the wrong bus speed |
+| ⚪ **No traffic** | Nothing received. Not connected, or the bus is quiet |
+| 🔴 **Bus off** / **No controller** | Controller stopped, or failed to start |
+
+On its own, an unplugged bus looks the same as a quiet one (**No traffic**).
+It shows **No ACK** once the bridge or TX Scheduler tries to send to it.
+
+The Theme toggle, DBC files and firmware updates are on the Config page.
 
 ---
 
@@ -78,8 +95,14 @@ pages: Config, DBC, TX Sched, Markers and OTA.
 
 Open **⚙ Config** from the dashboard.
 
-**Serial output mode** applies as soon as you press **Apply now**. Every other
-setting is saved when you press **Save & Reboot**, and the unit then restarts.
+The page has four cards, top to bottom:
+
+| Card | Applies |
+|------|---------|
+| **Serial logging**: output format | Straight away, when you press **Apply** |
+| **Bus speed** and **WiFi** | When you press **Save & Reboot**. The unit restarts |
+| **DBC files**: shows the active files, with **Manage DBC files** | See [section 4](#4-dbc-files-signal-decoding) |
+| **Firmware**: version, with **Update firmware** | See [section 8](#8-firmware-updates) |
 
 ### WiFi
 
@@ -100,7 +123,7 @@ When **Join a network** is selected, these settings appear:
 |---------|-------|
 | Network to join (SSID) | The name of your router or hotspot. 2.4 GHz only. The unit can't see 5 GHz networks. |
 | Network password | Leave blank for an open network. |
-| Device name | The name you use to reach the unit: `http://<name>.local`. Also shown in your router's device list. Letters, digits and `-` only. Leave blank to use the default, `canbridge-xxxxxx`. |
+| Device name | The name you use to reach the unit: `http://<name>.local`. Also shown in your router's device list. Letters, digits and `-` only. Leave blank to use the default, `canbridge`. Give each unit its own name if several share a network. |
 | Automatic IP (DHCP) | Recommended. The router picks the address; use the device name to find the unit. |
 | Static IP | You choose the IP address, subnet mask, gateway and (optionally) DNS. The address must be in your network's range but outside the router's DHCP pool. |
 
@@ -117,6 +140,31 @@ every minute, but only when nobody is connected to the hotspot.
 After you save in **Join a network** mode, the confirmation page shows the
 address to use. Connect your computer to the same network and open that
 address.
+
+#### Finding the unit on your network
+
+1. Connect your laptop to the **same WiFi network** the unit joined.
+2. In the browser, open **http://canbridge.local**. If you changed the
+   **Device name** in ⚙ Config, use that instead: `http://<device name>.local`.
+   Names are always lowercase, and you need to type the `http://` so the
+   browser doesn't run a search instead.
+
+   > **Several units on one network** must each have a different device name
+   > (see [section 3](#3-using-several-units)). Two units both called
+   > `canbridge` clash, and only one of them can be reached.
+
+If the `.local` address doesn't open:
+
+- **Check the unit joined.** If your WiFi list shows the unit's own hotspot
+  (`CanBridgeAnalyzer` by default), it couldn't join your network. Connect to
+  the hotspot, open http://192.168.1.1, and check the network name and
+  password. The network must be 2.4 GHz.
+- **Use the IP address.** Find the unit by its device name in your router's
+  list of connected devices, and open `http://<IP address>`. To keep that
+  address from changing, reserve it in the router or set a **Static IP**.
+- **Some systems don't support `.local` names**, for example some Android
+  devices, corporate networks, and Windows laptops on a VPN. Use the IP address
+  instead.
 
 If you lock yourself out, use the
 [factory reset](setup.md#7-factory-reset).
@@ -136,14 +184,13 @@ errors and can stop the bus. CAN FD presets are only offered on the MCP251863
 
 ### CAN0 and CAN1
 
-- **Enable**: turns that bus's controller on. Enable both to bridge.
-- **Print frames to serial**: includes that bus in the USB serial log. Turn it
-  off on very busy buses if the serial log overflows.
+Both buses are always on. The unit monitors both and forwards frames between
+them (bridge). There is nothing to set: a bus with nothing wired to it simply
+receives nothing.
 
-| Enabled | Behaviour |
-|---------|-----------|
-| CAN0 only or CAN1 only | Monitor that bus |
-| Both | Monitor both, and forward frames between them (bridge) |
+If only one bus is wired, frames bridged towards the empty side get no
+acknowledgement. In **CAN Diagnostics** mode that bus then reports NACK and
+Error Passive. This is expected and does no harm.
 
 ---
 
@@ -169,6 +216,15 @@ If a `.local` name doesn't open (some Android devices and corporate networks
 don't support it), use the IP address from your router's device list, or set
 static IPs.
 
+### Several people or browsers on one unit
+
+Connect **no more than two devices** (phones, tablets or laptops) to a unit at
+the same time. Both see the same live data. More devices slow the dashboard
+down and can make it disconnect.
+
+Settings are shared: Block, TX Scheduler, Markers, DBC and Config changes made
+on one device apply to both.
+
 ---
 
 ## 4. DBC files (signal decoding)
@@ -176,14 +232,18 @@ static IPs.
 A DBC file describes which signals are carried in which CAN IDs. Once a file is
 loaded, the dashboard shows signal names and values next to the raw bytes.
 
-Open **📄 DBC** from the dashboard:
+Open **⚙ Config**, then **📄 Manage DBC files** (or go to `/dbc`):
 
 - **Upload Over WiFi**: click **Choose .dbc file**, then **Upload**.
-- **Installed Files**: tick a file to make it active. Up to **4 files** can be
-  active at once, and their signals are merged. Your selection is kept after a
-  restart.
-- If the signal limit (about 768 signals) is reached, a warning appears. Untick
-  a file to free space.
+- **Installed Files**: tick a file to make it active. Any number of files can
+  be active, and their signals are merged. Your selection is kept after a
+  restart. The **Signals** column shows how many signals each file defines.
+- Signals are held in RAM, so the limit is the total number of signals (2,000),
+  not the number of files. If a file doesn't fully fit, its row shows how many
+  signals were loaded (for example ⚠ 1,200 / 2,900) and a warning appears;
+  messages whose signals were dropped show no decode. Untick a file to free space.
+- Files that were active but no longer exist (for example after re-uploading the
+  filesystem image) are removed from the selection automatically.
 
 Nissan Leaf DBC files (EV-CAN, CAR-CAN, QC-CAN) are included if the filesystem
 was loaded at install time.
@@ -242,7 +302,7 @@ one person can drive while another taps.
 ## 7. Logging to SavvyCAN over USB
 
 Connect the SPUD's USB port to your computer and use **115200 baud**. Choose the
-format under **⚙ Config → Serial output mode**. It applies straight away:
+format under **⚙ Config → Serial logging**. It applies straight away:
 
 | Mode | Use |
 |------|-----|
@@ -250,14 +310,21 @@ format under **⚙ Config → Serial output mode**. It applies straight away:
 | **SavvyCAN CSV** | Save the serial output to a `.csv` file, then in SavvyCAN use *File → Load Log File → GVRET Logs*. |
 | **Binary GVRET** | Live capture in SavvyCAN: *Add New Device Connection → GVRET Serial* and pick the COM port. If the connection drops, turn off *Validate Communications* in SavvyCAN's settings. |
 
+CSV and GVRET log both buses; the `Bus` column (0 or 1) tells them apart.
+Frames sent by the [TX Scheduler](#5-tx-scheduler-sending-frames) are logged
+too, on the bus they went out on, and marked `Tx` in the CSV `Dir` column.
+[Test markers](#6-test-markers) are always logged.
+
 The **⬤ Serial Log** button on the dashboard starts and stops serial output
-without restarting the unit.
+without restarting the unit. Hover over it to see the current format. It is
+always off after a reboot. In **Binary GVRET** mode it also
+switches on by itself when SavvyCAN connects.
 
 ---
 
 ## 8. Firmware updates
 
-1. Open **⬆ OTA** on the dashboard (or go to `/update`).
+1. Open **⚙ Config**, then **⬆ Update firmware** (or go to `/update`).
 2. Upload `firmware.bin` (the firmware) or `spiffs.bin` (the DBC file
    filesystem).
 3. The unit restarts on the new version. The previous firmware is kept; use
@@ -280,6 +347,7 @@ without restarting the unit.
 | The unit keeps falling back to its hotspot | Check the network name and password (case-sensitive), make sure it's a 2.4 GHz network, and check that the unit is in range. A wrong static IP can also stop it working. |
 | No messages appear | Check the bus speed matches the vehicle, the bus is enabled in Config, and CAN-H/CAN-L aren't swapped. Switch serial to **CAN Diagnostics** and read the report. |
 | Errors or bus-off | Speed or frame-type mismatch, or wrong [termination](setup.md#3-termination). |
+| Dashboard is slow or keeps disconnecting | Too many devices are connected. Keep it to two (see [section 3](#several-people-or-browsers-on-one-unit)). |
 | OTA page is greyed out | CAN traffic is flowing. Switch the vehicle off or unplug CAN. |
 | SavvyCAN won't connect | Use **Binary GVRET** mode, the right COM port and 115200 baud, and turn off *Validate Communications* in SavvyCAN. |
 
@@ -294,9 +362,8 @@ without restarting the unit.
 | WiFi mode | Own hotspot |
 | Hotspot name / password | `CanBridgeAnalyzer` / `canbus123` |
 | Hotspot address | http://192.168.1.1 |
-| Device name | `canbridge-xxxxxx` (from the unit's MAC address) |
+| Device name | `canbridge` |
 | Bus preset | 500 kbps CAN 2.0 |
-| CAN0 / CAN1 | Enabled / Disabled |
 | Serial mode | SavvyCAN CSV |
 
 ### Web pages

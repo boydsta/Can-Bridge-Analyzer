@@ -20,10 +20,32 @@
 #error "CAN_CHIP must be MCP2515 or MCP251863"
 #endif
 
-/** @brief Runtime serial logging mode flag. */
+/** @brief Serial Log on/off (dashboard button). Off at boot. */
 extern volatile bool g_serial_logging;
 /** @brief Serial output mode: 0=Diagnostics, 1=CSV, 2=Binary GVRET. */
 extern volatile uint8_t g_serial_mode;
+/** @brief Write one CAN frame to the serial log in the active format.
+ *  @details Defined in main.cpp. Thread-safe; callers check
+ *           serial_log_frames() first. tx=true marks frames this unit
+ *           transmitted (CSV Dir column). */
+void print_can_mesg(unsigned short bus, long unsigned int id, unsigned short len,
+                    uint8_t *buf, bool tx = false);
+
+/** @brief Per-bus health snapshot for the web UI (sampled once a second in loop()). */
+struct BusStatus {
+  bool     ok;         ///< Controller initialised
+  uint32_t rx_age_ms;  ///< ms since last received frame; UINT32_MAX = none since boot
+  uint8_t  tec;        ///< Transmit error counter (capped at 255)
+  uint8_t  rec;        ///< Receive error counter (capped at 255)
+  uint8_t  state;      ///< 0 = error active, 1 = warning, 2 = error passive, 3 = bus off
+};
+/** @brief Fill @p out for bus 0 or 1. Defined in main.cpp; safe from any task. */
+void get_bus_status(uint8_t bus, BusStatus& out);
+
+/** @brief True if CAN frames (both buses) should be written to the serial log now. */
+inline bool serial_log_frames() {
+  return g_serial_logging && g_serial_mode != 0;
+}
 
 #include <stdint.h>
 #include <stdio.h>
@@ -70,15 +92,11 @@ static const uint8_t k_default_preset = 2;  // 500 kbps CAN 2.0
 // CANConfig — all configurable settings persisted in NVS namespace "can_cfg"
 // ---------------------------------------------------------------------------
 struct CANConfig {
-  bool     can0_enable;     ///< Enable CAN0 controller
-  bool     can1_enable;     ///< Enable CAN1 controller
-  bool     can0_print;      ///< Print CAN0 frames to USB serial
-  bool     can1_print;      ///< Print CAN1 frames to USB serial
-  uint8_t  bus_preset;      ///< Index into k_bus_presets[] — encodes speed + frame type
+  uint8_t  bus_preset;     ///< Index into k_bus_presets[] — encodes speed + frame type
   uint8_t  serial_mode;     ///< 0=Diagnostics  1=SavvyCAN CSV  2=Binary GVRET
   char     wifi_ssid[33];   ///< WiFi AP SSID (max 32 chars) — own hotspot, also the fallback
   char     wifi_pass[64];   ///< WiFi AP password; empty = open network
-  char     active_dbcs[128]; ///< Comma-separated list of active DBC files (e.g. "leaf.dbc,tesla.dbc"); empty = none
+  char     active_dbcs[256]; ///< Comma-separated list of active DBC files (e.g. "leaf.dbc,tesla.dbc"); empty = none
 
   uint8_t  wifi_mode;       ///< WIFI_MODE_CFG_AP or WIFI_MODE_CFG_STA
   char     sta_ssid[33];    ///< Network to join (station mode)
@@ -94,22 +112,22 @@ struct CANConfig {
 static const uint8_t WIFI_MODE_CFG_AP  = 0;  ///< Run own hotspot only (default)
 static const uint8_t WIFI_MODE_CFG_STA = 1;  ///< Join a network; fall back to own hotspot on failure
 
-/** @brief Default hostname "canbridge-xxxxxx" from the last 3 bytes of the factory MAC. */
+/** @brief Default hostname "canbridge" (http://canbridge.local). The same on every unit,
+ *  so units sharing a network must each be given their own name in Config. */
 inline void default_hostname(char* out, size_t len) {
-  uint8_t mac[6] = {0};
-  esp_read_mac(mac, ESP_MAC_WIFI_STA);
-  snprintf(out, len, "canbridge-%02x%02x%02x", mac[3], mac[4], mac[5]);
+  snprintf(out, len, "canbridge");
 }
 
 /** @brief Load CANConfig from NVS, applying sensible defaults. */
+inline void save_can_config(const CANConfig& cfg);
+
 inline CANConfig load_can_config() {
   CANConfig cfg;
   Preferences prefs;
-  prefs.begin("can_cfg", /* readOnly= */ true);
-  cfg.can0_enable  = prefs.getBool("c0_en", true);
-  cfg.can1_enable  = prefs.getBool("c1_en", false);
-  cfg.can0_print   = prefs.getBool("c0_pr", true);
-  cfg.can1_print   = prefs.getBool("c1_pr", false);
+  /* Read-only open fails if the namespace has never been written (fresh or
+     erased flash). The getters below then return defaults, which we save
+     at the end so the namespace exists from first boot. */
+  const bool existed = prefs.begin("can_cfg", /* readOnly= */ true);
   cfg.bus_preset   = (uint8_t)prefs.getUChar("bus_preset", k_default_preset);
   if (cfg.bus_preset >= k_num_presets) cfg.bus_preset = k_default_preset;
   cfg.serial_mode  = (uint8_t)prefs.getUChar("ser_mode", 1);
@@ -140,7 +158,8 @@ inline CANConfig load_can_config() {
   strncpy(cfg.hostname, hn.c_str(), sizeof(cfg.hostname) - 1);
   cfg.hostname[sizeof(cfg.hostname) - 1] = '\0';
   if (cfg.hostname[0] == '\0') default_hostname(cfg.hostname, sizeof(cfg.hostname));
-  prefs.end();
+  if (existed) prefs.end();
+  else         save_can_config(cfg);   /* first boot: persist the defaults */
   return cfg;
 }
 
@@ -148,10 +167,6 @@ inline CANConfig load_can_config() {
 inline void save_can_config(const CANConfig& cfg) {
   Preferences prefs;
   prefs.begin("can_cfg", /* readOnly= */ false);
-  prefs.putBool("c0_en",    cfg.can0_enable);
-  prefs.putBool("c1_en",    cfg.can1_enable);
-  prefs.putBool("c0_pr",    cfg.can0_print);
-  prefs.putBool("c1_pr",    cfg.can1_print);
   prefs.putUChar("bus_preset", cfg.bus_preset);
   prefs.putUChar("ser_mode", cfg.serial_mode);
   prefs.putString("wifi_ssid", cfg.wifi_ssid);

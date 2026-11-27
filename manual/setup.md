@@ -25,7 +25,10 @@ for the first time. For using the web interface, see [How to use](usage.md).
 - A 12V supply, either the vehicle or a bench supply
 - A 2 A inline fuse
 - Twisted-pair wire for the CAN connections
-- A phone or laptop with WiFi
+- A **laptop or PC** with WiFi and a current browser (Chrome, Edge or Firefox).
+  A large tablet in landscape may also work. The analyser interface is too
+  detailed for a phone screen, although the Config and firmware update pages
+  can be used from a phone.
 - Optional: a USB cable, for logging to SavvyCAN or the first firmware install
 
 ---
@@ -94,7 +97,7 @@ block chosen IDs from being forwarded.
 ## 5. First power-up and connection
 
 1. Apply 12V. Allow about **10 seconds** for the unit to start.
-2. On your phone or laptop, join the WiFi network **`CanBridgeAnalyzer`**,
+2. On your laptop or PC, join the WiFi network **`CanBridgeAnalyzer`**,
    password **`canbus123`**. If your device warns that the network has no
    internet, stay connected anyway.
 3. Open **http://192.168.1.1** in a browser. The dashboard appears.
@@ -103,6 +106,11 @@ block chosen IDs from being forwarded.
    - **CAN0 / CAN1 enable**: one bus to listen, both to bridge.
    - A new **hotspot password**, so others nearby can't connect.
 5. Press **Save & Reboot**, then reconnect.
+
+To have the unit join your own WiFi instead, see
+[How to use → WiFi](usage.md#wifi). You then reach it at
+**http://canbridge.local**
+(see [Finding the unit on your network](usage.md#finding-the-unit-on-your-network)).
 
 To run several units on one network, see
 [How to use → Using several units](usage.md#3-using-several-units).
@@ -142,7 +150,7 @@ setting or a forgotten password.
 
 | Erased | Kept |
 |--------|------|
-| WiFi settings, bus speed, CAN enable, serial mode, TX Scheduler entries, marker plan | DBC files, firmware (including the rollback copy) |
+| WiFi settings, bus speed, serial mode, TX Scheduler entries, marker plan | DBC files, firmware (including the rollback copy) |
 
 - If 12V is already on pin 24 when the unit powers up, the reset doesn't
   happen. Remove the wire, then touch it on again. This means a jumper left in

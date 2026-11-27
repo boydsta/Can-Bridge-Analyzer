@@ -81,8 +81,16 @@ private:
 
     void reload_dbc_parser();
     static bool   is_in_dbc_list(const char* list, const char* fname);
-    static void   add_to_dbc_list(char* list, size_t list_size, const char* fname);
-    static void   remove_from_dbc_list(char* list, const char* fname);
+    static bool   add_to_dbc_list(char* list, size_t list_size, const char* fname);
+    static void   remove_from_dbc_list(char* list, size_t list_size, const char* fname);
+
+    /** @brief Signal count per installed DBC file. Only touched before server.begin()
+               and from AsyncTCP handlers, so it needs no lock. */
+    struct DBCFileInfo { String name; int32_t sigs; };
+    std::vector<DBCFileInfo> dbc_file_info;
+    void    scan_dbc_file_info();
+    void    set_dbc_file_info(const String& name, int32_t sigs);
+    int32_t get_dbc_file_info(const String& name) const;
 };
 
 #endif // WEB_SERVER_H

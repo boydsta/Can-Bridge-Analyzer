@@ -52,22 +52,29 @@ unsigned long g_last_can_rx_ms = 0;
 /** @brief OTA updates/restarts are blocked until the buses have been quiet this long. */
 const unsigned long k_ota_quiet_ms = 3000;
 
+/* Per-bus status for the web UI. Written by loop() only; error counters are
+   sampled there (not from the web task) because reading them needs SPI. */
+static volatile unsigned long s_bus_last_rx_ms[2] = {0, 0};
+static volatile uint8_t s_bus_tec[2]   = {0, 0};
+static volatile uint8_t s_bus_rec[2]   = {0, 0};
+static volatile uint8_t s_bus_state[2] = {0, 0};
+
 /* Active preset index — set in setup() from g_cfg.bus_preset. */
 uint8_t g_bus_preset_idx = k_default_preset;
 
 /** @brief Full runtime configuration — loaded from NVS in setup(). */
 CANConfig g_cfg;
 
-/** @brief Runtime serial logging flag.
- *  true  = CAN serial log to USB — suppress debug prints.
- *  false = debug prints enabled (default at boot).
- *  Toggled in real time via the web UI button. */
+/** @brief Serial Log on/off — the dashboard's Serial Log button.
+ *  false = nothing written to serial (default at boot, not persisted).
+ *  true  = output in the active g_serial_mode: diagnostic text (mode 0)
+ *          or frames from both buses (modes 1/2).
+ *  Also switched on automatically when SavvyCAN completes the GVRET handshake. */
 volatile bool g_serial_logging = false;
 
-/** @brief Serial log format selector.
- *  true  = GVRET / SavvyCAN format (default).
- *  false = Kvaser .asc format. */
-volatile bool g_serial_log_gvret = true;
+/** @brief Serialises frame writes — the RX loop, TX scheduler task and marker
+ *  handler all write frames, and a line must not be split by another. */
+static SemaphoreHandle_t s_serial_log_mutex = nullptr;
 
 /** @brief Serial output mode.
  *  0 = CAN Diagnostics  — debug prints + periodic bus health report.
@@ -160,10 +167,10 @@ void IRAM_ATTR can1_isr_wrapper() { can1.isr(); }
  *  stranded in the controller FIFO. */
 static inline void handle_deferred_can_isr() {
 #if CAN_CHIP != MCP2515
-  if (g_cfg.can0_enable) {
+  if (can0_success) {
     for (int i = 0; i < 16 && digitalRead(INT0) == LOW; i++) { can0.isr(); }
   }
-  if (g_cfg.can1_enable) {
+  if (can1_success) {
     for (int i = 0; i < 16 && digitalRead(INT1) == LOW; i++) { can1.isr(); }
   }
 #endif
@@ -237,10 +244,10 @@ static bool can_init() {
   };
 
   const uint32_t bps = k_bus_presets[g_cfg.bus_preset].arb_bps;
-  can0_success = !g_cfg.can0_enable || init_controller(can0, "CAN0", bps);
-  can1_success = !g_cfg.can1_enable || init_controller(can1, "CAN1", bps);
+  can0_success = init_controller(can0, "CAN0", bps);
+  can1_success = init_controller(can1, "CAN1", bps);
 #else
-  if (g_cfg.can0_enable) {
+  {
     mcp_spi_flush(CS0);
     const BusPreset& p = k_bus_presets[g_cfg.bus_preset];
     ACAN2517FDSettings settings0(ACAN2517FDSettings::OSC_40MHz, p.arb_bps,
@@ -268,11 +275,9 @@ static bool can_init() {
       Serial.printf("[CAN0] MCP251863 init %s at %lu bps\n",
                     can0_success ? "succeeded" : "failed", (unsigned long)p.arb_bps);
     }
-  } else {
-    can0_success = true;
   }
 
-  if (g_cfg.can1_enable) {
+  {
     mcp_spi_flush(CS1);
     const BusPreset& p1 = k_bus_presets[g_cfg.bus_preset];
     ACAN2517FDSettings settings1(ACAN2517FDSettings::OSC_40MHz, p1.arb_bps,
@@ -296,8 +301,6 @@ static bool can_init() {
       Serial.printf("[CAN1] MCP251863 init %s at %lu bps\n",
                     can1_success ? "succeeded" : "failed", (unsigned long)p1.arb_bps);
     }
-  } else {
-    can1_success = true;
   }
 #endif
 
@@ -312,24 +315,20 @@ void drain_can_rx_buffers() {
   const uint8_t max_drain_per_call = 100;
   uint8_t total_drained = 0;
 
-  if (g_cfg.can0_enable) {
-    if (can0_success) {
-      uint8_t can0_drained = 0;
-      while (can_controller_receive(can0, frame) && can0_drained < max_drain_per_call) {
-        can0_drained++;
-      }
-      total_drained += can0_drained;
+  if (can0_success) {
+    uint8_t can0_drained = 0;
+    while (can_controller_receive(can0, frame) && can0_drained < max_drain_per_call) {
+      can0_drained++;
     }
+    total_drained += can0_drained;
   }
 
-  if (g_cfg.can1_enable) {
-    if (can1_success) {
-      uint8_t can1_drained = 0;
-      while (can_controller_receive(can1, frame) && can1_drained < max_drain_per_call) {
-        can1_drained++;
-      }
-      total_drained += can1_drained;
+  if (can1_success) {
+    uint8_t can1_drained = 0;
+    while (can_controller_receive(can1, frame) && can1_drained < max_drain_per_call) {
+      can1_drained++;
     }
+    total_drained += can1_drained;
   }
 
   if (total_drained > 0 && g_serial_logging && g_serial_mode == 0) {
@@ -343,8 +342,10 @@ void drain_can_rx_buffers() {
  * @param id   CAN frame ID
  * @param len  Data length
  * @param buf  Data bytes
+ * @param tx   true for frames this unit transmitted (CSV Dir = Tx)
  */
-void print_can_mesg(unsigned short bus, long unsigned int id, unsigned short len, uint8_t *buf) {
+void print_can_mesg(unsigned short bus, long unsigned int id, unsigned short len, uint8_t *buf, bool tx) {
+  if (s_serial_log_mutex) xSemaphoreTake(s_serial_log_mutex, portMAX_DELAY);
   if (g_serial_mode == 2) {
     /* Binary GVRET frame — SavvyCAN live serial connection (Add New Device → GVRET Serial).
        Format: [0xF1][0x00][ts:4LE µs][id:4LE, bit31=ext][dlc|(bus<<4)][data...] */
@@ -365,7 +366,8 @@ void print_can_mesg(unsigned short bus, long unsigned int id, unsigned short len
     frame[9]  = (uint8_t)((gvret_id >> 24) & 0xFF);
     frame[10] = (uint8_t)(dlc | ((bus & 0x0F) << 4));
     for (uint8_t i = 0; i < dlc; i++) frame[11 + i] = buf[i];
-    Serial.write(frame, 11 + dlc);
+    Serial.write(frame, 11 + dlc);  /* GVRET frames carry no direction flag */
+    if (s_serial_log_mutex) xSemaphoreGive(s_serial_log_mutex);
     return;
   }
   /* Mode 1: SavvyCAN native CSV — save to .csv, import via File → Load Log File → GVRET Logs.
@@ -374,11 +376,12 @@ void print_can_mesg(unsigned short bus, long unsigned int id, unsigned short len
      Extended "true"/"false"; always 8 data columns padded with 00; trailing comma. */
   unsigned long tNow = millis() * 1000UL;
   const char* ext = (id > 0x7FF) ? "true" : "false";
-  Serial.printf("%lu,%08lX,%s,Rx,%u,%u", tNow, id, ext, bus, len);
+  Serial.printf("%lu,%08lX,%s,%s,%u,%u", tNow, id, ext, tx ? "Tx" : "Rx", bus, len);
   for (int i = 0; i < 8; i++) {
     Serial.printf(",%02X", (i < len) ? buf[i] : 0);
   }
   Serial.print(",\n");
+  if (s_serial_log_mutex) xSemaphoreGive(s_serial_log_mutex);
 }
 
 /**
@@ -396,12 +399,10 @@ void print_can_diagnostics() {
     Serial.printf("[%s] CAN 2.0  %ubps  TX errors=%u  RX errors=%u\n",
                   label, (unsigned)bps, ctrl.errorCountTX(), ctrl.errorCountRX());
   };
-  if (g_cfg.can0_enable && can0_success) {
-    report_bus("CAN0", can0, k_bus_presets[g_bus_preset_idx].arb_bps);
-  }
-  if (g_cfg.can1_enable && can1_success) {
-    report_bus("CAN1", can1, k_bus_presets[g_bus_preset_idx].arb_bps);
-  }
+  if (can0_success) { report_bus("CAN0", can0, k_bus_presets[g_bus_preset_idx].arb_bps); }
+  else { Serial.println("[CAN0] Controller failed to initialise."); }
+  if (can1_success) { report_bus("CAN1", can1, k_bus_presets[g_bus_preset_idx].arb_bps); }
+  else { Serial.println("[CAN1] Controller failed to initialise."); }
 #else
   auto report_bus = [](const char* label, ACAN2517FD& ctrl, bool fd_mode, uint32_t bps) {
     uint32_t ec = ctrl.errorCounters();
@@ -499,19 +500,11 @@ void print_can_diagnostics() {
     }
   };
 
-  if (g_cfg.can0_enable) {
-    if (can0_success) { report_bus("CAN0", can0, k_bus_presets[g_bus_preset_idx].is_fd, k_bus_presets[g_bus_preset_idx].arb_bps); }
-    else { Serial.println("[CAN0] Controller failed to initialise."); }
-  } else {
-    Serial.println("[CAN0] Disabled in config.");
-  }
+  if (can0_success) { report_bus("CAN0", can0, k_bus_presets[g_bus_preset_idx].is_fd, k_bus_presets[g_bus_preset_idx].arb_bps); }
+  else { Serial.println("[CAN0] Controller failed to initialise."); }
 
-  if (g_cfg.can1_enable) {
-    if (can1_success) { report_bus("CAN1", can1, k_bus_presets[g_bus_preset_idx].is_fd, k_bus_presets[g_bus_preset_idx].arb_bps); }
-    else { Serial.println("[CAN1] Controller failed to initialise."); }
-  } else {
-    Serial.println("[CAN1] Disabled in config.");
-  }
+  if (can1_success) { report_bus("CAN1", can1, k_bus_presets[g_bus_preset_idx].is_fd, k_bus_presets[g_bus_preset_idx].arb_bps); }
+  else { Serial.println("[CAN1] Controller failed to initialise."); }
 #endif
 
   Serial.println("==========================================");
@@ -546,25 +539,25 @@ void print_can_ascii(uint8_t bus, long unsigned int id, uint8_t len, uint8_t *bu
 void handle_incoming_can() {
   messages_processed = 0;
 
-  if (g_cfg.can0_enable && can_controller_available(can0)) {
+  if (can0_success && can_controller_available(can0)) {
     can0MessageProcTime = micros();
     while (can_controller_receive(can0, frame) && messages_processed < max_messages_per_call) {
       messages_processed++;
       if (can_bridge != nullptr) {
         can_bridge->onMessageReceived(frame, 0);
       }
-      if (g_serial_logging && g_serial_mode != 0) {
+      if (serial_log_frames()) {
         print_can_mesg(0, frame.id, frame.len, frame.data);
       }
     }
     if (messages_processed >= max_messages_per_call && can_controller_available(can0)) {
       if (g_serial_logging && g_serial_mode == 0) { Serial.printf("CAN0: Processed %d messages, more pending\n", messages_processed); }
     }
-    if (messages_processed > 0) g_last_can_rx_ms = millis();
+    if (messages_processed > 0) g_last_can_rx_ms = s_bus_last_rx_ms[0] = millis();
     perf_stats.update_can0_proc(micros() - can0MessageProcTime, messages_processed);
   }
 
-  if (g_cfg.can1_enable && can_controller_available(can1)) {
+  if (can1_success && can_controller_available(can1)) {
     can1MessageProcTime = micros();
     messages_processed = 0;
     while (can_controller_receive(can1, frame) && messages_processed < max_messages_per_call) {
@@ -572,14 +565,14 @@ void handle_incoming_can() {
       if (can_bridge != nullptr) {
         can_bridge->onMessageReceived(frame, 1);
       }
-      if (g_serial_logging && g_serial_mode != 0) {
+      if (serial_log_frames()) {
         print_can_mesg(1, frame.id, frame.len, frame.data);
       }
     }
     if (messages_processed >= max_messages_per_call && can_controller_available(can1)) {
       if (g_serial_logging && g_serial_mode == 0) { Serial.printf("CAN1: Processed %d messages, more pending\n", messages_processed); }
     }
-    if (messages_processed > 0) g_last_can_rx_ms = millis();
+    if (messages_processed > 0) g_last_can_rx_ms = s_bus_last_rx_ms[1] = millis();
     perf_stats.update_can1_proc(micros() - can1MessageProcTime, messages_processed);
   }
 }
@@ -610,55 +603,30 @@ void setup() {
   g_cfg = load_can_config();
   g_bus_preset_idx = g_cfg.bus_preset;
   g_serial_mode = g_cfg.serial_mode;
+  s_serial_log_mutex = xSemaphoreCreateMutex();
   if (g_serial_logging && g_serial_mode == 0) {
-    const BusPreset& bp = k_bus_presets[g_bus_preset_idx];
-    Serial.printf("[CAN] Config: CAN0=%s | CAN1=%s | %s\n",
-                  g_cfg.can0_enable ? "ON" : "OFF",
-                  g_cfg.can1_enable ? "ON" : "OFF",
-                  bp.label);
+    Serial.printf("[CAN] Config: %s\n", k_bus_presets[g_bus_preset_idx].label);
   }
+  /* Both controllers always run. An idle or unwired bus just receives nothing. */
   can_init();
 
   delay(1000);
   drain_can_rx_buffers();
 
-  if (g_cfg.can0_enable && g_cfg.can1_enable) {
-    if (can0_success && can1_success) {
-      can_bridge = new CANBridge(&can0, &can1);
-      can_bridge->begin();
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("Bridge mode: CAN0 \xe2\x86\x94 CAN1 (Bidirectional bridge)"); }
-    } else if (can0_success) {
-      can_bridge = new CANBridge(&can0, nullptr);
-      can_bridge->begin();
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("Analysis mode: CAN0 (Monitor only - CAN1 failed)"); }
-    } else if (can1_success) {
-      can_bridge = new CANBridge(&can1, nullptr);
-      can_bridge->begin();
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("Analysis mode: CAN1 (Monitor only - CAN0 failed)"); }
-    } else {
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("Warning: No CAN controllers initialized successfully"); }
-      can_bridge = nullptr;
-    }
-  } else if (g_cfg.can0_enable) {
-    if (can0_success) {
-      can_bridge = new CANBridge(&can0, nullptr);
-      can_bridge->begin();
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("Analysis mode: CAN0 (Monitor only - single controller)"); }
-    } else {
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("Warning: CAN0 controller failed to initialize"); }
-      can_bridge = nullptr;
-    }
-  } else if (g_cfg.can1_enable) {
-    if (can1_success) {
-      can_bridge = new CANBridge(&can1, nullptr);
-      can_bridge->begin();
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("Analysis mode: CAN1 (Monitor only - single controller)"); }
-    } else {
-      if (g_serial_logging && g_serial_mode == 0) { Serial.println("Warning: CAN1 controller failed to initialize"); }
-      can_bridge = nullptr;
-    }
+  if (can0_success && can1_success) {
+    can_bridge = new CANBridge(&can0, &can1);
+    can_bridge->begin();
+    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Bridge mode: CAN0 \xe2\x86\x94 CAN1 (Bidirectional bridge)"); }
+  } else if (can0_success) {
+    can_bridge = new CANBridge(&can0, nullptr);
+    can_bridge->begin();
+    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Analysis mode: CAN0 (Monitor only - CAN1 failed)"); }
+  } else if (can1_success) {
+    can_bridge = new CANBridge(&can1, nullptr);
+    can_bridge->begin();
+    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Analysis mode: CAN1 (Monitor only - CAN0 failed)"); }
   } else {
-    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Warning: No CAN controllers enabled in runtime config"); }
+    if (g_serial_logging && g_serial_mode == 0) { Serial.println("Warning: No CAN controllers initialized successfully"); }
     can_bridge = nullptr;
   }
 
@@ -709,17 +677,21 @@ static void gvret_reply(uint8_t cmd) {
       r[0]=0xF1; r[1]=0x06;
       r[2]=(uint8_t)spd;      r[3]=(uint8_t)(spd>>8);
       r[4]=(uint8_t)(spd>>16); r[5]=(uint8_t)(spd>>24);
-      r[6] = g_cfg.can0_enable ? 0x10 : 0x00;
+      r[6] = can0_success ? 0x10 : 0x00;
       r[7]=(uint8_t)spd;      r[8]=(uint8_t)(spd>>8);
       r[9]=(uint8_t)(spd>>16); r[10]=(uint8_t)(spd>>24);
-      r[11] = g_cfg.can1_enable ? 0x10 : 0x00;
+      r[11] = can1_success ? 0x10 : 0x00;
       n = 12; break;
     }
     case 0x07: {  /* GET_DEVICE_INFO — SavvyCAN sets CONNECTED on receipt */
       r[0]=0xF1; r[1]=0x07;
       r[2]=0x00; r[3]=0x00;
       r[4]=0x00; r[5]=0x00;
-      n = 6; break;
+      n = 6;
+      /* SavvyCAN has connected — start streaming frames without waiting for
+         the dashboard's Serial Log button. The button can still stop it. */
+      g_serial_logging = true;
+      break;
     }
     case 0x09:  /* GET_NUM_BUSES */
       r[0]=0xF1; r[1]=0x09; r[2]=2; n = 3; break;
@@ -768,6 +740,40 @@ static void handle_gvret_commands() {
   }
 }
 
+/** @brief Read each controller's error counters into the s_bus_* cache. */
+static void sample_bus_errors() {
+  CANController* ctrls[2] = { &can0, &can1 };
+  const bool ok[2] = { can0_success, can1_success };
+  for (int b = 0; b < 2; b++) {
+    if (!ok[b]) continue;
+#if CAN_CHIP == MCP2515
+    uint8_t tec = ctrls[b]->errorCountTX();
+    uint8_t rec = ctrls[b]->errorCountRX();
+    s_bus_tec[b] = tec;
+    s_bus_rec[b] = rec;
+    s_bus_state[b] = (tec >= 128 || rec >= 128) ? 2 : (tec >= 96 || rec >= 96) ? 1 : 0;
+#else
+    uint32_t ec = ctrls[b]->errorCounters();
+    s_bus_rec[b] = (uint8_t)(ec & 0xFF);
+    s_bus_tec[b] = (uint8_t)((ec >> 8) & 0xFF);
+    if ((ec >> 21) & 1)                     s_bus_state[b] = 3;  /* bus off */
+    else if (((ec >> 19) & 1) || ((ec >> 20) & 1)) s_bus_state[b] = 2;  /* error passive */
+    else if ((ec >> 16) & 1)                s_bus_state[b] = 1;  /* warning */
+    else                                    s_bus_state[b] = 0;
+#endif
+  }
+}
+
+void get_bus_status(uint8_t bus, BusStatus& out) {
+  if (bus > 1) bus = 1;
+  out.ok    = bus == 0 ? can0_success : can1_success;
+  unsigned long last = s_bus_last_rx_ms[bus];
+  out.rx_age_ms = last == 0 ? UINT32_MAX : (uint32_t)(millis() - last);
+  out.tec   = s_bus_tec[bus];
+  out.rec   = s_bus_rec[bus];
+  out.state = s_bus_state[bus];
+}
+
 void loop() {
   unsigned long loop_start = micros();
 
@@ -813,6 +819,11 @@ void loop() {
   perf_stats.update_main_loop(loop_end - loop_start);
 
   unsigned long now = millis();
+  static unsigned long last_bus_sample = 0;
+  if (now - last_bus_sample >= 1000) {
+    sample_bus_errors();
+    last_bus_sample = now;
+  }
   if (g_serial_logging && g_serial_mode == 0) {
     static unsigned long last_diag_print = 0;
     if (now - last_diag_print >= 5000) {

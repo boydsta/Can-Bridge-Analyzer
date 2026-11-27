@@ -8,3 +8,7 @@
 | [**How to use**](usage.md) | Dashboard, configuration and WiFi, several units, DBC files, TX Scheduler, Test Markers, SavvyCAN logging, firmware updates, troubleshooting |
 
 New to the unit? Start with [Hardware setup](setup.md).
+
+You need a **laptop or PC** with WiFi to use the analyser. Its interface is too
+detailed for a phone screen.
+

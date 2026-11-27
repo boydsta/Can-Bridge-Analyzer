@@ -10,7 +10,7 @@ components below, each under its own license.
 |-----------|---------|--------|-------|
 | spud-diy (`src/spud.h`, parts of `src/main.cpp`) | MIT, © 2024 Ra Cleave | https://github.com/racleave/spud-diy | Notice kept in `src/spud.h` |
 | ACAN2517FD | MIT, © 2018 Pierre Molinaro | https://github.com/pierremolinaro/acan2517FD | Vendored in `lib/ACAN2517FD` with local patches ([PATCHES.md](lib/ACAN2517FD/PATCHES.md)) |
-| CustomOTA-ESP32 v1.6.1 | MIT, © 2025 Boyd Benton | https://github.com/boydsta/CustomOTA-ESP32 | |
+| CustomOTA-ESP32 v1.6.2 | MIT, © 2025 Boyd Benton | https://github.com/boydsta/CustomOTA-ESP32 | |
 | AsyncTCP (mathieucarbou fork) ^3.2.3 | LGPL-3.0 | https://github.com/mathieucarbou/AsyncTCP | |
 | ESPAsyncWebServer (mathieucarbou fork) ^3.1.1 | LGPL-3.0 | https://github.com/mathieucarbou/ESPAsyncWebServer | |
 | MCP_CAN_lib (MCP2515 build only) | LGPL-3.0 | https://github.com/coryjfowler/MCP_CAN_lib | |

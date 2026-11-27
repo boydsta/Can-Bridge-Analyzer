@@ -12,6 +12,8 @@
 #include <SPIFFS.h>
 #include <map>
 #include <vector>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 /** @brief Maximum signal name length (including null terminator). */
 #define DBC_NAME_LEN   32
@@ -21,8 +23,10 @@
 #define DBC_PATH_LEN   48
 /** @brief Maximum file upload size in bytes (512 KB). */
 #define DBC_MAX_FILE_BYTES (512 * 1024UL)
-/** @brief Hard cap on total signals loaded across all DBC files. */
-#define DBC_MAX_SIGNALS   768
+/** @brief Hard cap on total signals loaded across all DBC files (~60 B each in RAM). */
+#define DBC_MAX_SIGNALS   2000
+/** @brief Stop loading signals when free heap falls below this, whatever the cap. */
+#define DBC_MIN_FREE_HEAP (64 * 1024UL)
 
 /**
  * @brief Decoded CAN signal definition parsed from a DBC file.
@@ -40,33 +44,64 @@ struct DBCSignal {
     float   max_val;              ///< Maximum physical value from DBC [min|max] field
 };
 
+/** @brief Per-file load result. */
+struct DBCFileStat {
+    char     name[DBC_PATH_LEN];  ///< File name without leading '/'
+    uint16_t defined;             ///< Signals the file defines
+    uint16_t loaded;              ///< Signals actually stored (rest dropped at cap)
+};
+
+/** @brief Why loading stopped storing signals. */
+enum DBCLimit : uint8_t { DBC_LIMIT_NONE = 0, DBC_LIMIT_CAP = 1, DBC_LIMIT_HEAP = 2 };
+
+/** @brief Consistent snapshot of the loaded database, for status pages. */
+struct DBCSummary {
+    bool     busy;                ///< true = a load was in progress; other fields are empty
+    uint32_t messages;
+    uint32_t signals;
+    uint32_t dropped;             ///< Signals defined in active files but not stored
+    DBCLimit limit;
+    std::vector<DBCFileStat> files;
+};
+
+/**
+ * @brief Streaming counter of signal (SG_) lines, fed arbitrary byte chunks.
+ * @details Counts lines of the form "<whitespace>SG_", which is what the parser accepts.
+ */
+struct DBCSignalCounter {
+    uint32_t count = 0;
+    uint8_t  state = 0;   ///< 0=line start, 1=leading ws seen, 2='S', 3='G', 4=rest of line
+    void feed(const uint8_t* data, size_t len);
+    /** @brief Count SG_ lines in a SPIFFS file. @return count, or -1 if it can't be opened. */
+    static int32_t count_file(const char* path);
+};
+
+/** @brief Cursor for streaming the signal database as JSON across several calls. */
+struct DBCJsonCursor {
+    uint32_t gen        = 0;      ///< Database generation the stream started on
+    uint32_t next_id    = 0;      ///< CAN ID of the message being emitted
+    size_t   sig_idx    = 0;      ///< Next signal index within that message
+    uint8_t  phase      = 0;      ///< 0=not started, 1=messages, 2=done
+    bool     first_msg  = true;
+    char     pend[320];           ///< Text generated but not yet copied out
+    size_t   pend_len   = 0;
+    size_t   pend_off   = 0;
+};
+
 /**
  * @brief Minimal DBC file parser.
- * @details Parses BO_ (message) and SG_ (signal) lines. Multiplexed signals
- *          are ignored. Comments, attributes, and value tables are ignored.
+ * @details Parses BO_ (message) and SG_ (signal) lines. Comments, attributes, and
+ *          value tables are ignored.
  *
- *          Signals are stored keyed by message ID. Call decode() to extract
- *          physical values from a received CAN frame.
+ *          Signals are stored keyed by message ID. Loading runs in the loop task while
+ *          readers run in the AsyncTCP task, so all access goes through an internal mutex.
  */
 class DBCParser {
 public:
     DBCParser();
 
-    /**
-     * @brief Load and parse a DBC file from SPIFFS.
-     * @param path Full SPIFFS path, e.g. "/leaf.dbc"
-     * @return true on success, false if file could not be opened.
-     */
-    bool load_from_spiffs(const char* path);
-
-    /**
-     * @brief Load and parse an additional DBC file, merging signals with any already loaded.
-     * @details Existing signals are kept. If two files define signals for the same CAN ID,
-     *          signals from the new file are appended to that ID's list.
-     * @param path Full SPIFFS path, e.g. "/tesla.dbc"
-     * @return true on success.
-     */
-    bool load_additive_from_spiffs(const char* path);
+    /** @brief Unload, then load each file in turn, merging signals by CAN ID. */
+    void load_files(const std::vector<String>& paths);
 
     /** @brief Unload current database and free memory. */
     void clear();
@@ -78,43 +113,38 @@ public:
      * @param len      Payload length in bytes.
      * @param json_out Output: JSON array of decoded signals, e.g.
      *                 [{"n":"PackVoltage","v":387.5,"u":"V"}, ...]
-     *                 Empty array "[]" if no signals are defined for this ID.
+     *                 Empty array "[]" if no signals are defined (or a load is in progress).
      * @return Number of signals decoded (0 if none found).
      */
-    int decode(uint32_t can_id, const uint8_t* data, uint8_t len, String& json_out) const;
+    int decode(uint32_t can_id, const uint8_t* data, uint8_t len, String& json_out);
 
-    /** @return true if the loaded database contains signals for can_id. */
-    bool has_signals_for(uint32_t can_id) const;
-
-    /** @return Currently loaded DBC file path, empty string if none. */
-    const char* active_path() const { return active_dbc_path[0] ? active_dbc_path : ""; }
-
-    /** @return Number of message definitions in the loaded database. */
-    size_t message_count() const { return signals.size(); }
-
-    /** @return Total number of signals in the loaded database. */
-    size_t signal_count() const;
+    /** @brief Snapshot of counts and per-file results. Never blocks for long. */
+    DBCSummary summary();
 
     /**
-     * @brief Serialise the entire signal database as a JSON object.
-     * @details Keys are lowercase hex CAN IDs (e.g. \"0x1db\"). Values are arrays of signal
-     *          objects: {n, sb, bl, le, si, sc, of, u, mn, mx}.
-     *          Intended for serving to the browser once at page load.
-     * @return JSON string.
+     * @brief Write the next piece of the signal database JSON into buf.
+     * @details Keys are lowercase hex CAN IDs (e.g. "0x1db"). Values are arrays of
+     *          signal objects: {n, sb, bl, le, si, sc, of, u, mn, mx}.
+     * @return Bytes written; 0 when finished (or when the database changed mid-stream);
+     *         RESPONSE_TRY_AGAIN-style value `try_again` while a load holds the lock.
      */
-    String to_json() const;
+    size_t json_chunk(DBCJsonCursor& cur, uint8_t* buf, size_t max_len, size_t try_again);
 
 private:
     std::map<uint32_t, std::vector<DBCSignal>> signals; ///< signals keyed by CAN ID
-    char active_dbc_path[DBC_PATH_LEN];                 ///< path of loaded file
+    std::vector<DBCFileStat> file_stats;
+    uint32_t sig_total = 0;
+    uint32_t dropped   = 0;
+    DBCLimit limit     = DBC_LIMIT_NONE;
+    volatile uint32_t generation = 0;     ///< Bumped on every clear/load
+    SemaphoreHandle_t mtx;
 
-    /**
-     * @brief Parse a single line from the DBC file.
-     * @param line       Line text (trimmed of \\r).
-     * @param current_id In/out: current message ID context (UINT32_MAX = none).
-     */
-    void parse_line(const String& line, uint32_t& current_id);
-    bool load_file(const char* path);  ///< Internal: parse file without clearing first.
+    enum LineResult : uint8_t { LINE_OTHER, LINE_STORED, LINE_DROPPED };
+    LineResult parse_line(const String& line, uint32_t& current_id);
+    bool load_file(const char* path);     ///< Internal: parse file without clearing first.
+    void clear_locked();
+    bool can_store();                      ///< Cap / heap check; records the limit hit.
+    void fill_pending(DBCJsonCursor& cur); ///< Generate the next record into cur.pend
 
     /**
      * @brief Extract raw unsigned integer value from CAN payload bits.

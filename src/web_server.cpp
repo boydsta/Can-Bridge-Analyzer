@@ -22,7 +22,9 @@ body{font-family:'Monaco','Menlo',monospace;font-size:13px;background:#f5f5f5;co
 .wrap{max-width:820px;margin:24px auto;padding:0 20px;line-height:1.6}
 table{border-collapse:collapse;width:100%;background:#fff;margin:12px 0}
 th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}th{background:#dde3ea}
-code{background:#e8e8e8;padding:1px 4px;border-radius:3px}
+code{background:#e8e8e8;padding:1px 4px;border-radius:3px;overflow-wrap:anywhere}
+td{overflow-wrap:anywhere}
+@media (max-width:600px){.wrap{padding:0 12px}th,td{padding:4px 5px;font-size:12px}}
 </style></head><body>
 <div class="top"><h1>Open source licences</h1><a href="/config">&larr; Back to config</a></div>
 <div class="wrap">
@@ -81,12 +83,8 @@ extern CANConfig g_cfg;
 /* [NEW] Current CAN speed — read-only here, set by setup() from NVS. */
 extern uint32_t g_can_speed;
 
-/* Runtime serial logging flag — defined in main_reverse_engineering.cpp. */
-extern volatile bool g_serial_logging;
-/* Runtime serial log format flag — true = GVRET/SavvyCAN, false = Kvaser .asc. */
-extern volatile bool g_serial_log_gvret;
-/* Runtime serial output mode: 0=Diagnostics  1=SavvyCAN CSV  2=Binary GVRET */
-extern volatile uint8_t g_serial_mode;
+/* Serial logging globals (g_serial_logging, g_serial_mode) are
+   declared in can_config.h and defined in main.cpp. */
 
 /* [OLD] Runtime-reinit volatile flags removed — speed changes now save to
    NVS and reboot rather than hotswapping the CAN controllers mid-flight.
@@ -102,6 +100,21 @@ CANWebServer::CANWebServer(CANBridge* bridge)
         this->onWebSocketEvent(server, client, type, arg, data, len);
     });
     server.addHandler(&ws);
+}
+
+/* DBC upload result, kept per request. AsyncWebServerRequest's destructor calls
+   free(_tempObject), so it must point at real heap memory — never store a
+   number cast to a pointer there (that asserts in heap_caps_free and reboots). */
+enum { UPLOAD_FAIL = 0, UPLOAD_OK = 1, UPLOAD_TOO_LARGE = 2, UPLOAD_INVALID = 3,
+       UPLOAD_FULL = 4, UPLOAD_OPEN = 5 };
+
+static void set_upload_status(AsyncWebServerRequest* req, int status) {
+    if (req->_tempObject == nullptr) req->_tempObject = malloc(sizeof(int));
+    if (req->_tempObject != nullptr) *(int*)req->_tempObject = status;
+}
+
+static int get_upload_status(AsyncWebServerRequest* req) {
+    return req->_tempObject ? *(int*)req->_tempObject : UPLOAD_FAIL;
 }
 
 void CANWebServer::begin() {
@@ -208,25 +221,17 @@ void CANWebServer::begin() {
     /* /api/get_config — returns all current runtime settings as JSON */
     server.on("/api/get_config", HTTP_GET, [](AsyncWebServerRequest *request) {
         String resp = "{";
-        resp += "\"can0_enable\":"  + String(g_cfg.can0_enable ? "true" : "false") + ",";
-        resp += "\"can1_enable\":"  + String(g_cfg.can1_enable ? "true" : "false") + ",";
         resp += "\"bus_preset\":"   + String(g_cfg.bus_preset);
         resp += "}";
         request->send(200, "application/json", resp);
     });
 
     /* /api/set_config — save all settings to NVS then reboot.
-       POST body (form-encoded): can0_enable=1&can1_enable=0&bus_preset=2&name=MY-LOGGER */
+       POST body (form-encoded): bus_preset=2&wifi_ssid=...&... */
     server.on("/api/set_config", HTTP_POST, [](AsyncWebServerRequest *request) {
         /* Start from the live config so fields not on this form (e.g. active_dbcs)
            are preserved rather than saved as uninitialised garbage. */
         CANConfig cfg = g_cfg;
-
-        /* Checkboxes absent = false (enable flags). */
-        cfg.can0_enable = request->hasParam("can0_enable", true);
-        cfg.can1_enable = request->hasParam("can1_enable", true);
-        cfg.can0_print  = request->hasParam("can0_print",  true);
-        cfg.can1_print  = request->hasParam("can1_print",  true);
 
         /* Bus preset — validated against k_bus_presets table */
         uint8_t preset = k_default_preset;
@@ -330,9 +335,7 @@ void CANWebServer::begin() {
 
         save_can_config(cfg);
         if (g_serial_logging && g_serial_mode == 0) {
-          Serial.printf("[CFG] Saved: CAN0=%s | CAN1=%s | preset=%u (%s). Rebooting...\n",
-                        cfg.can0_enable ? "ON" : "OFF",
-                        cfg.can1_enable ? "ON" : "OFF",
+          Serial.printf("[CFG] Saved: preset=%u (%s). Rebooting...\n",
                         cfg.bus_preset, k_bus_presets[cfg.bus_preset].label);
         }
         String done = "<html><body style='font-family:monospace;background:#1a1a1a;color:#2ecc71;padding:40px'>"
@@ -360,6 +363,25 @@ void CANWebServer::begin() {
             "{\"error\":\"set_speed is deprecated. Use /api/set_config with bus_preset.\"}");
     });
 
+    /* /api/bus_status — per-bus health for the dashboard panel badges.
+       rx_age = ms since last frame (-1 = none since boot); state 0..3 =
+       error active / warning / error passive / bus off. */
+    server.on("/api/bus_status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String resp = "[";
+        for (uint8_t b = 0; b < 2; b++) {
+            BusStatus s;
+            get_bus_status(b, s);
+            if (b) resp += ",";
+            resp += "{\"ok\":" + String(s.ok ? "true" : "false") +
+                    ",\"rx_age\":" + (s.rx_age_ms == UINT32_MAX ? String("-1") : String(s.rx_age_ms)) +
+                    ",\"tec\":" + String(s.tec) +
+                    ",\"rec\":" + String(s.rec) +
+                    ",\"state\":" + String(s.state) + "}";
+        }
+        resp += "]";
+        request->send(200, "application/json", resp);
+    });
+
     server.on("/api/get_speed", HTTP_GET, [](AsyncWebServerRequest *request) {
         uint8_t p = g_cfg.bus_preset;
         String resp = "{\"preset\":" + String(p) +
@@ -380,7 +402,9 @@ void CANWebServer::begin() {
             Serial.printf("[DBC] SPIFFS mounted — total %u B, used %u B\n",
                           (unsigned)SPIFFS.totalBytes(), (unsigned)SPIFFS.usedBytes());
         }
-        /* Load all previously-selected DBC files on startup. */
+        /* Count signals in every installed DBC (for the /dbc page), then load
+           the previously-selected files. Runs before server.begin(). */
+        scan_dbc_file_info();
         reload_dbc_parser();
         /* Load marker plan and restore step/run from NVS. */
         g_marker_plan.begin();
@@ -511,13 +535,15 @@ void CANWebServer::begin() {
     });
 
     /* /api/dbc/signals — full parsed signal database as JSON for browser-side decode.
-       Fetched once at page load; browser caches and decodes all signals in-browser. */
+       Fetched once at page load; browser caches and decodes all signals in-browser.
+       Streamed in chunks so a large database never needs one big String on the heap. */
     server.on("/api/dbc/signals", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        if (reload_dbc_pending) {
-            reload_dbc_pending = false;
-            reload_dbc_parser();
-        }
-        request->send(200, "application/json", dbc_parser.to_json());
+        std::shared_ptr<DBCJsonCursor> cur = std::make_shared<DBCJsonCursor>();
+        request->sendChunked("application/json",
+            [this, cur](uint8_t* buf, size_t max_len, size_t /*index*/) -> size_t {
+                if (reload_dbc_pending) return RESPONSE_TRY_AGAIN;  /* reload about to run */
+                return dbc_parser.json_chunk(*cur, buf, max_len, RESPONSE_TRY_AGAIN);
+            });
     });
 
     /* /api/dbc/select — POST file=<name.dbc>&enable=1|0
@@ -541,46 +567,27 @@ void CANWebServer::begin() {
             enable = (request->getParam("enable", true)->value() != "0");
         }
 
+        /* The only limit on active files is the signal budget (RAM). Once it's
+           full, another file would load nothing, so refuse it. */
         if (enable && !is_in_dbc_list(g_cfg.active_dbcs, fname.c_str())) {
-            /* Count currently active files. */
-            int active_count = (g_cfg.active_dbcs[0] != '\0') ? 1 : 0;
-            for (const char* p = g_cfg.active_dbcs; *p; p++) {
-                if (*p == ',') active_count++;
-            }
-            if (active_count >= 4) {
+            DBCSummary s = dbc_parser.summary();
+            if (!s.busy && s.limit != DBC_LIMIT_NONE) {
                 request->send(409, "application/json",
-                    "{\"error\":\"Max 4 DBC files active at once — deselect one first\"}");
+                    "{\"error\":\"Signal budget full \\u2014 deselect a file first\"}");
                 return;
             }
-            /* Warn if the file is very large (likely to hit signal cap). */
-            File chk = SPIFFS.open(path, "r");
-            size_t fsz = chk ? chk.size() : 0;
-            if (chk) chk.close();
-            if (fsz > 150 * 1024UL && dbc_parser.signal_count() > DBC_MAX_SIGNALS / 2) {
-                /* Not a hard block — just log; the cap protects us. */
-                if (g_serial_logging && g_serial_mode == 0) {
-                    Serial.printf("[DBC] Warning: enabling large file %s (%u KB) "
-                                  "with %u/%u signals already loaded\n",
-                                  fname.c_str(), (unsigned)(fsz/1024),
-                                  (unsigned)dbc_parser.signal_count(), DBC_MAX_SIGNALS);
-                }
+            if (!add_to_dbc_list(g_cfg.active_dbcs, sizeof(g_cfg.active_dbcs), fname.c_str())) {
+                request->send(409, "application/json",
+                    "{\"error\":\"Too many active files (name list full) \\u2014 deselect one first\"}");
+                return;
             }
-        }
-
-        if (enable) {
-            add_to_dbc_list(g_cfg.active_dbcs, sizeof(g_cfg.active_dbcs), fname.c_str());
-        } else {
-            remove_from_dbc_list(g_cfg.active_dbcs, fname.c_str());
+        } else if (!enable) {
+            remove_from_dbc_list(g_cfg.active_dbcs, sizeof(g_cfg.active_dbcs), fname.c_str());
         }
         save_can_config(g_cfg);
-        reload_dbc_pending = true;
+        reload_dbc_pending = true;   /* loaded in update() (loop task) */
 
-        String resp = "{\"ok\":true,\"active_dbcs\":\"" + String(g_cfg.active_dbcs) + "\""
-                      ",\"messages\":" + String(dbc_parser.message_count()) +
-                      ",\"signals\":"  + String(dbc_parser.signal_count())  +
-                      ",\"sig_cap\":"  + String(DBC_MAX_SIGNALS) +
-                      ",\"capped\":"   + String(dbc_parser.signal_count() >= DBC_MAX_SIGNALS ? "true" : "false") + "}";
-        request->send(200, "application/json", resp);
+        request->send(200, "application/json", "{\"ok\":true}");
     });
 
     /* /api/dbc/delete — POST file=<name.dbc> */
@@ -597,9 +604,12 @@ void CANWebServer::begin() {
             return;
         }
         SPIFFS.remove(path);
+        for (size_t i = 0; i < dbc_file_info.size(); i++) {
+            if (dbc_file_info[i].name == fname) { dbc_file_info.erase(dbc_file_info.begin() + i); break; }
+        }
 
         /* Remove from active list if present, persist, reload parser. */
-        remove_from_dbc_list(g_cfg.active_dbcs, fname.c_str());
+        remove_from_dbc_list(g_cfg.active_dbcs, sizeof(g_cfg.active_dbcs), fname.c_str());
         save_can_config(g_cfg);
         reload_dbc_pending = true;
 
@@ -608,24 +618,23 @@ void CANWebServer::begin() {
 
     /* /api/dbc/upload — multipart POST, saves file to SPIFFS.
        Guards: max size, SPIFFS space, DBC content validation (must contain BO_/SG_ lines).
-       _tempObject encodes result: 0=fail, 1=ok, 2=too large, 3=invalid DBC, 4=SPIFFS full. */
+       Result is tracked with set_upload_status() / get_upload_status(). */
     server.on("/api/dbc/upload", HTTP_POST,
         /* Completion handler */
         [](AsyncWebServerRequest* request) {
-            intptr_t status = (intptr_t)request->_tempObject;
-            switch (status) {
-                case 1:
+            switch (get_upload_status(request)) {
+                case UPLOAD_OK:
                     request->send(200, "application/json", "{\"ok\":true}");
                     break;
-                case 2:
+                case UPLOAD_TOO_LARGE:
                     request->send(413, "application/json",
                         "{\"error\":\"File exceeds 512 KB limit\", \"code\":2}");
                     break;
-                case 3:
+                case UPLOAD_INVALID:
                     request->send(400, "application/json",
                         "{\"error\":\"Not a valid DBC file — no BO_ or SG_ definitions found\", \"code\":3}");
                     break;
-                case 4:
+                case UPLOAD_FULL:
                     request->send(507, "application/json",
                         "{\"error\":\"SPIFFS storage full — delete a file first\", \"code\":4}");
                     break;
@@ -635,15 +644,17 @@ void CANWebServer::begin() {
             }
         },
         /* Chunk handler */
-        [](AsyncWebServerRequest* request, const String& filename,
+        [this](AsyncWebServerRequest* request, const String& filename,
            size_t index, uint8_t* data, size_t len, bool final) {
             static File   upload_file;
             static bool   upload_has_dbc;   /* found BO_ or SG_ marker */
             static char   upload_path[64];
+            static DBCSignalCounter upload_sigs;
 
             if (index == 0) {
-                request->_tempObject = nullptr;
+                set_upload_status(request, UPLOAD_FAIL);
                 upload_has_dbc = false;
+                upload_sigs = DBCSignalCounter();
                 String fname = CANWebServer::sanitize_dbc_filename(filename);
                 String path  = "/" + fname;
                 strncpy(upload_path, path.c_str(), sizeof(upload_path) - 1);
@@ -651,23 +662,24 @@ void CANWebServer::begin() {
 
                 /* Check SPIFFS free space (keep 4 KB reserve). */
                 if (SPIFFS.totalBytes() - SPIFFS.usedBytes() < 4096) {
-                    request->_tempObject = (void*)4;
+                    set_upload_status(request, UPLOAD_FULL);
                     return;
                 }
 
                 upload_file = SPIFFS.open(path, "w");
-                if (!upload_file) return;  /* _tempObject stays nullptr → 500 */
-                request->_tempObject = (void*)0xFF;  /* open, not yet validated */
+                if (!upload_file) return;  /* status stays UPLOAD_FAIL → 500 */
+                set_upload_status(request, UPLOAD_OPEN);  /* open, not yet validated */
             }
 
-            if ((intptr_t)request->_tempObject == 4) return;  /* SPIFFS full — drain */
+            /* Only keep writing while this request's file is open and healthy. */
+            if (get_upload_status(request) != UPLOAD_OPEN) return;
             if (!upload_file) return;
 
             /* Enforce maximum file size. */
             if (index + len > DBC_MAX_FILE_BYTES) {
                 upload_file.close();
                 SPIFFS.remove(String(upload_path));
-                request->_tempObject = (void*)2;
+                set_upload_status(request, UPLOAD_TOO_LARGE);
                 return;
             }
 
@@ -685,15 +697,20 @@ void CANWebServer::begin() {
             }
 
             upload_file.write(data, len);
+            upload_sigs.feed(data, len);
 
             if (final) {
                 upload_file.close();
                 if (!upload_has_dbc) {
                     /* Looks like binary or non-DBC text — reject. */
                     SPIFFS.remove(String(upload_path));
-                    request->_tempObject = (void*)3;
+                    set_upload_status(request, UPLOAD_INVALID);
                 } else {
-                    request->_tempObject = (void*)1;
+                    set_upload_status(request, UPLOAD_OK);
+                    String fname = String(upload_path + 1);
+                    set_dbc_file_info(fname, (int32_t)upload_sigs.count);
+                    /* Replaced a file that's in use — reload it. */
+                    if (is_in_dbc_list(g_cfg.active_dbcs, fname.c_str())) reload_dbc_pending = true;
                 }
             }
         }
@@ -727,7 +744,8 @@ void CANWebServer::begin() {
 
     // API endpoint to toggle serial logging in real time
     server.on("/api/serial_logging", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String resp = "{\"serial_logging\":" + String(g_serial_logging ? "true" : "false") + "}";
+        String resp = "{\"serial_logging\":" + String(g_serial_logging ? "true" : "false") +
+                      ",\"serial_mode\":" + String(g_serial_mode) + "}";
         request->send(200, "application/json", resp);
     });
     server.on("/api/serial_logging", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -751,21 +769,6 @@ void CANWebServer::begin() {
         request->send(200, "application/json", resp);
     });
 
-    // API endpoint to get/toggle serial log format
-    server.on("/api/serial_log_format", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String resp = "{\"gvret\":" + String(g_serial_log_gvret ? "true" : "false") + "}";
-        request->send(200, "application/json", resp);
-    });
-    server.on("/api/serial_log_format", HTTP_POST, [](AsyncWebServerRequest *request) {
-        if (request->hasParam("gvret", true)) {
-            g_serial_log_gvret = (request->getParam("gvret", true)->value() == "1");
-        } else {
-            g_serial_log_gvret = !g_serial_log_gvret;
-        }
-        String resp = "{\"gvret\":" + String(g_serial_log_gvret ? "true" : "false") + "}";
-        request->send(200, "application/json", resp);
-    });
-
     /* /api/set_serial_mode — change serial output mode immediately, no reboot.
        POST: serial_mode=0|1|2  (0=Diag, 1=CSV, 2=Binary GVRET)
        Saves to NVS so the mode survives a reboot. */
@@ -777,6 +780,7 @@ void CANWebServer::begin() {
         uint8_t m = (uint8_t)request->getParam("serial_mode", true)->value().toInt();
         if (m > 2) m = 1;
         g_serial_mode = m;
+        g_cfg.serial_mode = m;
         // Persist so it survives reboot
         Preferences prefs;
         prefs.begin("can_cfg", false);
@@ -1017,12 +1021,9 @@ const char* CANWebServer::generateMainPage() {
             </span>
             <span class="message-count">Messages: <span id="total-messages">0</span></span>
             <button id="serial-log-btn" class="btn small" onclick="toggleSerialLogging()" style="background:#e67e22;border-color:#e67e22">⬤ Serial Log</button>
-            <button id="theme-btn" class="btn small secondary" onclick="toggleTheme()">☀ Theme</button>
-            <a href="/config" class="btn small secondary" style="text-decoration:none">&#9881; Config</a>
-            <a href="/dbc" class="btn small secondary" style="text-decoration:none">&#128196; DBC</a>
             <a href="/tx" class="btn small secondary" style="text-decoration:none">&#128257; TX Sched</a>
             <a href="/markers" class="btn small secondary" style="text-decoration:none">&#128204; Markers</a>
-            <a href="/update" class="btn small secondary" style="text-decoration:none">&#11014; OTA</a>
+            <a href="/config" class="btn small secondary" style="text-decoration:none">&#9881; Config</a>
         </div>
     </div>
 
@@ -1030,7 +1031,7 @@ const char* CANWebServer::generateMainPage() {
         <!-- CAN0 Messages (Left Panel) -->
         <div class="left-panel">
             <div class="panel-header">
-                <h3>� CAN0 Messages (CAN0→CAN1)</h3>
+                <h3>� CAN0 Messages (CAN0→CAN1) <span class="bus-badge" id="can0-bus-status">…</span></h3>
                 <div class="panel-controls">
                     <button class="btn small warning" id="block-can0-btn" title="Block selected CAN0 message">🚫 Block</button>
                     <button class="btn small secondary" id="pin-can0-btn" title="Pin selected CAN0 message">📌 Pin</button>
@@ -1115,7 +1116,7 @@ const char* CANWebServer::generateMainPage() {
         <!-- CAN1 Messages (Right Panel) -->
         <div class="right-panel">
             <div class="panel-header">
-                <h3>� CAN1 Messages (CAN1→CAN0)</h3>
+                <h3>� CAN1 Messages (CAN0←CAN1) <span class="bus-badge" id="can1-bus-status">…</span></h3>
                 <div class="panel-controls">
                     <button class="btn small warning" id="block-can1-btn" title="Block selected CAN1 message">🚫 Block</button>
                     <button class="btn small secondary" id="pin-can1-btn" title="Pin selected CAN1 message">📌 Pin</button>
@@ -1265,6 +1266,24 @@ body {
     color: #2ecc71;
     font-size: 16px;
 }
+
+/* Per-bus status pill in the CAN0 / CAN1 panel headers */
+.bus-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 9px;
+    font-size: 10px;
+    font-weight: 700;
+    vertical-align: middle;
+    color: #fff;
+    background: #7f8c8d;
+    cursor: help;
+}
+.bus-badge.live { background: #27ae60; }
+.bus-badge.warn { background: #e67e22; }
+.bus-badge.bad  { background: #c0392b; }
+.bus-badge.idle { background: #7f8c8d; }
 
 .message-count {
     color: #2ecc71;
@@ -2513,7 +2532,7 @@ class CANAnalyzer {
         document.querySelectorAll('.message-details').forEach(el => el.style.display = 'block');
 
         document.getElementById('selected-id').textContent = msg.id;
-        document.getElementById('selected-bus').textContent = this.selectedBus === 'can0' ? 'CAN0→CAN1' : 'CAN1→CAN0';
+        document.getElementById('selected-bus').textContent = this.selectedBus === 'can0' ? 'CAN0→CAN1' : 'CAN0←CAN1';
         document.getElementById('selected-dlc').textContent = msg.dlc || 0;
         document.getElementById('selected-period').textContent = msg.periodMs ? msg.periodMs + 'ms' : 'Static';
         document.getElementById('selected-count').textContent = (msg.can0_count || 0) + (msg.can1_count || 0);
@@ -2709,7 +2728,7 @@ class CANAnalyzer {
         // Update selected source display
         const sourceDisplay = document.getElementById('selected-source');
         if (sourceDisplay) {
-            const busName = busType === 'can0' ? 'CAN0→CAN1' : 'CAN1→CAN0';
+            const busName = busType === 'can0' ? 'CAN0→CAN1' : 'CAN0←CAN1';
             sourceDisplay.textContent = `${id} (${busName})`;
         }
         
@@ -3044,15 +3063,50 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(r => r.json())
         .then(d => { const el = document.getElementById('bus-speed-info'); if (el) el.textContent = 'Bus: ' + d.label; })
         .catch(() => {});
+    // Per-bus connection badges in the panel headers
+    pollBusStatus();
+    setInterval(pollBusStatus, 2000);
     // Sync serial log button state on page load
     fetch('/api/serial_logging')
         .then(r => r.json())
-        .then(data => updateSerialLogBtn(data.serial_logging));
+        .then(data => updateSerialLogBtn(data.serial_logging, data));
 });
 
-function updateSerialLogBtn(active) {
+/* Classify one bus from /api/bus_status into a badge: [css class, label, tooltip]. */
+function busBadge(s) {
+    const cnt = ' (TEC ' + s.tec + ', REC ' + s.rec + ')';
+    if (!s.ok) return ['bad', 'No controller', 'The CAN controller did not start. Hardware fault, or this build has no second controller.'];
+    if (s.state === 3) return ['bad', 'Bus off', 'Too many transmit errors; the controller has stopped. Check speed, wiring and termination, then reboot.' + cnt];
+    const live = s.rx_age >= 0 && s.rx_age < 3000;
+    if (live && s.state >= 1) return ['warn', 'Live · errors', 'Receiving frames, but with errors. Check termination and speed.' + cnt];
+    if (live) return ['live', 'Live', 'Receiving frames.' + cnt];
+    if (s.tec >= 96) return ['warn', 'No ACK', 'Frames sent to this bus are not acknowledged. Nothing connected, wrong speed, or no other powered node.' + cnt];
+    if (s.rec >= 96) return ['warn', 'RX errors', 'Seeing corrupted frames. Likely wrong bus speed or wiring.' + cnt];
+    return ['idle', 'No traffic', (s.rx_age < 0 ? 'Nothing received since boot' : 'Nothing received for ' + Math.round(s.rx_age / 1000) + ' s') +
+            '. Not connected, or the bus is quiet.' + cnt];
+}
+
+function pollBusStatus() {
+    fetch('/api/bus_status')
+        .then(r => r.json())
+        .then(list => list.forEach((s, i) => {
+            const el = document.getElementById('can' + i + '-bus-status');
+            if (!el) return;
+            const [cls, label, tip] = busBadge(s);
+            el.className = 'bus-badge ' + cls;
+            el.textContent = '● ' + label;
+            el.title = tip;
+        }))
+        .catch(() => {});
+}
+
+function updateSerialLogBtn(active, info) {
     const btn = document.getElementById('serial-log-btn');
     if (!btn) return;
+    if (info && info.serial_mode !== undefined) {
+        const fmt = ['Diagnostics', 'SavvyCAN CSV', 'Binary GVRET'][info.serial_mode] || '?';
+        btn.title = 'Serial output: ' + fmt + ' (change on the Config page)';
+    }
     if (active) {
         btn.style.background = '#e67e22';
         btn.style.borderColor = '#e67e22';
@@ -3101,10 +3155,9 @@ String CANWebServer::generateConfigPage() {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CAN Logger - Config</title>
-<script>(function(){var t=localStorage.getItem('theme')||'light';document.documentElement.dataset.theme=t;document.documentElement.setAttribute('data-theme',t);})();</script>
-<script>(function(){var t=localStorage.getItem('theme')||'light';document.documentElement.dataset.theme=t;document.documentElement.setAttribute('data-theme',t);})();</script>
+<script>(function(){var t=localStorage.getItem('theme')||'light';document.documentElement.dataset.theme=t;})();</script>
 <style>
-:root{--bg:#1a1a1a;--text:#e0e0e0;--text-dim:#7f8c8d;--text-hdr:#ecf0f1;--card:#252525;--card-hd:#34495e;--border:#34495e;--row-bdr:#2a2a2a;--in-bg:#2c3e50;--in-txt:#ecf0f1;--btn-s:#34495e;--btn-st:#ecf0f1;--hdr-dim:#95a5a6;--seg-off:#2c3e50;--seg-off-txt:#95a5a6}
+:root{--ok:#27ae60;--bg:#1a1a1a;--text:#e0e0e0;--text-dim:#7f8c8d;--text-hdr:#ecf0f1;--card:#252525;--card-hd:#34495e;--border:#34495e;--row-bdr:#2a2a2a;--in-bg:#2c3e50;--in-txt:#ecf0f1;--btn-s:#34495e;--btn-st:#ecf0f1;--hdr-dim:#95a5a6;--seg-off:#2c3e50;--seg-off-txt:#95a5a6}
 [data-theme="light"]{--bg:#f5f5f5;--text:#1a1a1a;--text-dim:#555;--text-hdr:#1a1a1a;--card:#fff;--card-hd:#dde3ea;--border:#c0c0c0;--row-bdr:#e5e5e5;--in-bg:#fff;--in-txt:#1a1a1a;--btn-s:#dde3ea;--btn-st:#1a1a1a;--hdr-dim:#666;--seg-off:#e0e0e0;--seg-off-txt:#666}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Monaco','Menlo',monospace;font-size:13px;background:var(--bg);color:var(--text);padding:0}
@@ -3112,8 +3165,8 @@ body{font-family:'Monaco','Menlo',monospace;font-size:13px;background:var(--bg);
   padding:10px 20px;display:flex;justify-content:space-between;align-items:center}
 .topbar a{color:#3498db;text-decoration:none;font-weight:700}
 .topbar-r{display:flex;align-items:center;gap:12px}
-#theme-btn{padding:4px 12px;font-size:11px;cursor:pointer;background:rgba(255,255,255,0.1);color:#ecf0f1;border:1px solid rgba(255,255,255,0.3);border-radius:4px;font-family:inherit}
-#theme-btn:hover{background:rgba(255,255,255,0.2)}
+#theme-btn,.topbar a.tb-btn{padding:4px 12px;font-size:11px;font-weight:400;cursor:pointer;background:rgba(255,255,255,0.1);color:#ecf0f1;border:1px solid rgba(255,255,255,0.3);border-radius:4px;font-family:inherit}
+#theme-btn:hover,.topbar a.tb-btn:hover{background:rgba(255,255,255,0.2)}
 h1{color:#3498db;font-size:16px}
 .wrap{max-width:640px;margin:40px auto;padding:0 20px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:8px;margin-bottom:24px;overflow:hidden}
@@ -3128,12 +3181,6 @@ h1{color:#3498db;font-size:16px}
 select,input[type=text]{background:var(--in-bg);border:1px solid var(--border);color:var(--in-txt);
   padding:6px 10px;border-radius:4px;font-family:inherit;font-size:13px;width:100%}
 select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
-/* Segmented button pair for CAN 2.0 / CAN FD */
-.seg{display:inline-flex;border-radius:5px;overflow:hidden;border:1px solid var(--border)}
-.seg button{padding:5px 16px;border:none;cursor:pointer;font-family:inherit;font-size:12px;
-  font-weight:600;background:var(--seg-off);color:var(--seg-off-txt);transition:background .15s}
-.seg button.active{background:#3498db;color:#fff}
-.seg button:first-child{border-right:1px solid var(--border)}
 .btn-row{padding:16px;display:flex;gap:12px;justify-content:flex-end}
 .btn{padding:8px 20px;border:none;border-radius:4px;cursor:pointer;font-family:inherit;
   font-size:13px;font-weight:700;text-decoration:none;display:inline-block}
@@ -3141,8 +3188,16 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
 .btn.primary:hover{background:#2980b9}
 .btn.secondary{background:var(--btn-s);color:var(--btn-st)}
 .btn.secondary:hover{background:#4a6a7c;color:#ecf0f1}
-.note{background:rgba(243,156,18,0.1);border:1px solid #f39c12;border-radius:6px;
-  color:#f39c12;padding:10px 14px;font-size:11px;margin-bottom:20px;line-height:1.6}
+/* Phone width: stack label above its control, let the top bar wrap. The settings pages
+   stay usable on a phone; the analyser console itself needs a laptop or PC. */
+@media (max-width:600px){
+  .topbar{flex-wrap:wrap;gap:8px;padding:10px 12px}
+  .topbar-r{flex-wrap:wrap;gap:8px}
+  .wrap{margin:20px auto;padding:0 12px}
+  .row{flex-direction:column;gap:6px}
+  .row label{min-width:0 !important}
+  .btn-row{flex-wrap:wrap}
+}
 </style>
 </head>
 <body>
@@ -3154,48 +3209,60 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
   </div>
 </div>
 <div class="wrap">
-  <!-- ── LIVE SETTINGS: no reboot needed ─────────────────────────── -->
+  <!-- ── 1. SERIAL LOGGING (live, no reboot) ─────────────────────── -->
   <div class="card">
-    <div class="card-head">Serial output mode <span style="color:var(--ok)">Takes effect immediately — no reboot needed</span></div>
-    <div class="row">
-      <label><input type="radio" name="serial_mode_live" value="0")html";
-    page += (g_serial_mode == 0) ? " checked" : "";
-    page += R"html(> CAN Diagnostics</label>
-      <div class="desc">No frame logging. Periodic bus health report every 2 s: error counters, TEC/REC,
-        bus state (Error Active / Passive / Bus Off) and actionable wiring/termination guidance.
-        Use this when commissioning the bus or troubleshooting connection problems.</div>
-    </div>
+    <div class="card-head">Serial logging <span style="color:var(--ok)">Applies immediately</span></div>
     <div class="row">
       <label><input type="radio" name="serial_mode_live" value="1")html";
     page += (g_serial_mode == 1) ? " checked" : "";
-    page += R"html(> SavvyCAN CSV &mdash; file import</label>
-      <div class="desc">Frames logged as comma-separated text (SavvyCAN native format).
-        Save the serial output to a <code>.csv</code> file, then import in SavvyCAN:
+    page += R"html(> SavvyCAN CSV</label>
+      <div class="desc">Save the serial output as <code>.csv</code>, then in SavvyCAN:
         File &rarr; Load Log File &rarr; GVRET Logs.</div>
     </div>
     <div class="row">
       <label><input type="radio" name="serial_mode_live" value="2")html";
     page += (g_serial_mode == 2) ? " checked" : "";
-    page += R"html(> Binary GVRET &mdash; live serial connection</label>
-      <div class="desc">Frames sent as binary GVRET protocol for real-time capture.
-        In SavvyCAN: Add New Device Connection &rarr; GVRET Serial &rarr; select this COM port.<br>
-        Tip: disable <em>Validate Communications</em> in SavvyCAN settings for a stable connection.</div>
+    page += R"html(> Binary GVRET</label>
+      <div class="desc">Live capture. In SavvyCAN: Add New Device Connection &rarr; GVRET Serial &rarr;
+        this COM port. Logging starts by itself when SavvyCAN connects.</div>
     </div>
-    <div class="btn-row" style="margin-top:6px">
-      <button type="button" class="btn primary" onclick="applySerialMode()">Apply now</button>
-      <span id="serial-status" style="font-size:12px;margin-left:12px"></span>
+    <div class="row">
+      <label><input type="radio" name="serial_mode_live" value="0")html";
+    page += (g_serial_mode == 0) ? " checked" : "";
+    page += R"html(> CAN Diagnostics</label>
+      <div class="desc">No frames. A bus health report every 5 s with wiring and termination
+        advice. Use when commissioning.</div>
+    </div>
+    <div class="btn-row">
+      <span class="desc" style="flex:1;color:var(--text-dim);font-size:11px;line-height:1.5">Start and stop with
+        <b>Serial Log</b> on the analyser page. Both buses are logged; TX Scheduler frames are marked
+        <code>Tx</code>.</span>
+      <span id="serial-status" style="font-size:12px;align-self:center"></span>
+      <button type="button" class="btn primary" onclick="applySerialMode()">Apply</button>
     </div>
   </div>
 
-  <!-- ── REBOOT SETTINGS ─────────────────────────────────────────── -->
-  <div class="note">
-    The settings below are saved to flash and applied after reboot. The device will restart automatically when you click Save.
-  </div>
-
+  <!-- ── 2. REBOOT SETTINGS (form) ───────────────────────────────── -->
   <form method="POST" action="/api/set_config">
 
     <div class="card">
-      <div class="card-head">WiFi <span>Requires reboot to apply</span></div>
+      <div class="card-head">Bus speed <span>Both buses &middot; reboot to apply</span></div>
+      <div class="row">
+        <label style="min-width:180px">Preset</label>
+        <div style="flex:1">
+          <select name="bus_preset">)html";
+
+    page += presetOpts;
+
+    page += R"html(</select>
+          <div class="desc">Every node on the bus must use the same speed and frame type.
+            Most vehicles: 500 kbps CAN 2.0.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">WiFi <span>Reboot to apply</span></div>
       <div class="row">
         <label style="min-width:180px">Current status</label>
         <div class="desc" style="flex:1;color:var(--text)">)html";
@@ -3248,8 +3315,9 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
     page += html_escape(g_cfg.hostname);
     page += R"html(">
           <div class="desc">Reach the unit at <code>http://&lt;name&gt;.local</code> and see it under this
-            name in your router. Give each unit a different name, e.g. <code>canbridge-front</code>.
-            Letters, digits and '-'. Blank = default from the MAC address.</div>
+            name in your router. Default <code>canbridge</code> (<code>http://canbridge.local</code>).
+            If several units share a network, give each a different name, e.g. <code>canbridge-front</code>.
+            Letters, digits and '-'. Blank = default.</div>
         </div>
       </div>
       <div class="row">
@@ -3321,56 +3389,6 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-head">Bus speed &amp; frame type <span>Applies to both CAN0 and CAN1 — requires reboot</span></div>
-      <div class="row">
-        <label style="min-width:180px">Preset</label>
-        <div style="flex:1">
-          <select name="bus_preset">)html";
-
-    page += presetOpts;
-
-    page += R"html(</select>
-          <div class="desc">Speed and frame type are set together — both buses share the same setting.
-            CAN 2.0 is classic CAN up to 8 bytes (most vehicles).
-            CAN FD shows arbitration / data rates (e.g. 500k / 2M).
-            All nodes on the bus must use the same preset.</div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">CAN0 — Bus 0 (left panel) <span>Connector pins 20 (H) / 8 (L)</span></div>
-      <div class="row">
-        <label><input type="checkbox" name="can0_enable")html";
-    page += chk(g_cfg.can0_enable);
-    page += R"html(> Enable CAN0</label>
-        <div class="desc">Activate the CAN0 controller. Disable to save CPU time if only one bus is needed.</div>
-      </div>
-      <div class="row">
-        <label><input type="checkbox" name="can0_print")html";
-    page += chk(g_cfg.can0_print);
-    page += R"html(> Print frames to serial</label>
-        <div class="desc">Log CAN0 frames to USB serial. Disable on busy buses to prevent serial buffer overflow.</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">CAN1 — Bus 1 (right panel) <span>Connector pins 19 (H) / 7 (L)</span></div>
-      <div class="row">
-        <label><input type="checkbox" name="can1_enable")html";
-    page += chk(g_cfg.can1_enable);
-    page += R"html(> Enable CAN1</label>
-        <div class="desc">Activate the CAN1 controller. Enable alongside CAN0 to bridge or log two buses simultaneously.</div>
-      </div>
-      <div class="row">
-        <label><input type="checkbox" name="can1_print")html";
-    page += chk(g_cfg.can1_print);
-    page += R"html(> Print frames to serial</label>
-        <div class="desc">Log CAN1 frames to USB serial.</div>
-      </div>
-    </div>
-
     <div class="btn-row">
       <a href="/" class="btn secondary">Cancel</a>
       <button type="submit" class="btn primary">Save &amp; Reboot</button>
@@ -3378,16 +3396,26 @@ select:focus,input[type=text]:focus{outline:none;border-color:#3498db}
 
   </form>
 
-  <!-- ── FIRMWARE UPDATE ─────────────────────────────────────────── -->
+  <!-- ── 3. DBC FILES ────────────────────────────────────────────── -->
   <div class="card">
-    <div class="card-head">Firmware update <span>v)html";
+    <div class="card-head">DBC files <span>Decode signals on the analyser page</span></div>
+    <div class="row">
+      <div class="desc" style="flex:1">Active: <b style="color:var(--text)">)html";
+    page += g_cfg.active_dbcs[0] ? html_escape(g_cfg.active_dbcs) : String("none");
+    page += R"html(</b><br>Upload, enable or remove <code>.dbc</code> files.</div>
+      <a href="/dbc" class="btn primary" style="white-space:nowrap">&#128196; Manage DBC files</a>
+    </div>
+  </div>
+
+  <!-- ── 4. FIRMWARE ─────────────────────────────────────────────── -->
+  <div class="card">
+    <div class="card-head">Firmware <span>v)html";
     page += FW_VERSION;
     page += R"html(</span></div>
     <div class="row">
-      <div class="desc" style="flex:1">Upload new firmware (<code>firmware.bin</code>) or a DBC filesystem
-        image (<code>spiffs.bin</code>) over WiFi. The previous firmware is kept and can be restored with Rollback.
-        Updates are blocked while CAN traffic is flowing &mdash; turn the vehicle off or disconnect CAN first.</div>
-      <a href="/update" class="btn primary" style="white-space:nowrap">&#11014; Open update page</a>
+      <div class="desc" style="flex:1">Update over WiFi (<code>firmware.bin</code> or <code>spiffs.bin</code>).
+        The previous version is kept for rollback. Blocked while CAN traffic is flowing.</div>
+      <a href="/update" class="btn primary" style="white-space:nowrap">&#11014; Update firmware</a>
     </div>
     <div class="row">
       <div class="desc" style="flex:1">This firmware contains open source software (MIT, LGPL, GPL, Apache-2.0).
@@ -3406,8 +3434,7 @@ function wifiUi() {
 wifiUi();
 document.querySelector('form').addEventListener('submit', function(e) {
   e.preventDefault();
-  if (!confirm('Save settings and reboot the device?')) return;
-  if (!confirm('Are you sure? The device will restart and lose all current CAN data.')) return;
+  if (!confirm('Save and reboot? Captured CAN data on the analyser page will be cleared.')) return;
   this.submit();
 });
 function applySerialMode() {
@@ -3419,7 +3446,7 @@ function applySerialMode() {
     .then(function(r){ return r.json(); })
     .then(function(j){
       var el = document.getElementById('serial-status');
-      if (el) { el.textContent = 'Applied \u2713'; el.style.color = 'var(--ok, #2ecc71)'; }
+      if (el) { el.textContent = 'Applied \u2713'; el.style.color = 'var(--ok)'; }
     })
     .catch(function(){
       var el = document.getElementById('serial-status');
@@ -3538,9 +3565,8 @@ String CANWebServer::get_selected_payload_detail(uint32_t can_id) {
     detail += "}";
 
     /* Append DBC-decoded signals if a database is loaded for this ID. */
-    if (dbc_parser.has_signals_for(can_id)) {
-        String signals_json;
-        dbc_parser.decode(can_id, stats.last_payload, 8, signals_json);
+    String signals_json;
+    if (dbc_parser.decode(can_id, stats.last_payload, 8, signals_json) > 0) {
         /* Remove closing braces we just added, insert signals field, re-close. */
         detail.remove(detail.length() - 2);  /* strip last "}}" */
         detail += ",\"signals\":";
@@ -4077,17 +4103,18 @@ bool CANWebServer::is_in_dbc_list(const char* list, const char* fname) {
     return false;
 }
 
-void CANWebServer::add_to_dbc_list(char* list, size_t list_size, const char* fname) {
-    if (is_in_dbc_list(list, fname)) return;
+bool CANWebServer::add_to_dbc_list(char* list, size_t list_size, const char* fname) {
+    if (is_in_dbc_list(list, fname)) return true;
     String l = String(list);
     if (l.length() > 0) l += ",";
     l += fname;
-    if (l.length() >= list_size) return;
+    if (l.length() >= list_size) return false;   /* wouldn't fit — caller reports it */
     strncpy(list, l.c_str(), list_size - 1);
     list[list_size - 1] = '\0';
+    return true;
 }
 
-void CANWebServer::remove_from_dbc_list(char* list, const char* fname) {
+void CANWebServer::remove_from_dbc_list(char* list, size_t list_size, const char* fname) {
     String l = String(list);
     String f = String(fname);
     String result = "";
@@ -4105,31 +4132,78 @@ void CANWebServer::remove_from_dbc_list(char* list, const char* fname) {
         if (comma < 0) break;
         pos = comma + 1;
     }
-    strncpy(list, result.c_str(), 127);
-    list[127] = '\0';
+    strncpy(list, result.c_str(), list_size - 1);
+    list[list_size - 1] = '\0';
 }
 
+/* Load every active DBC file. Names whose file no longer exists (SPIFFS wiped by
+   uploadfs / OTA, or removed outside the web UI) are dropped from the saved list,
+   otherwise they would keep counting as active forever. */
 void CANWebServer::reload_dbc_parser() {
-    dbc_parser.clear();
-    if (g_cfg.active_dbcs[0] == '\0') return;
+    std::vector<String> paths;
+    String kept;
+    bool pruned = false;
+
     String list = String(g_cfg.active_dbcs);
     int pos = 0;
-    bool first_loaded = false;
     while (pos <= (int)list.length()) {
         int comma = list.indexOf(',', pos);
         String fname = (comma < 0) ? list.substring(pos) : list.substring(pos, comma);
         fname.trim();
         if (fname.length() > 0) {
             String path = "/" + fname;
-            if (!first_loaded) {
-                if (dbc_parser.load_from_spiffs(path.c_str())) first_loaded = true;
+            if (spiffs_mounted && SPIFFS.exists(path)) {
+                if (kept.length() > 0) kept += ",";
+                kept += fname;
+                paths.push_back(path);
             } else {
-                dbc_parser.load_additive_from_spiffs(path.c_str());
+                pruned = true;
+                if (g_serial_logging && g_serial_mode == 0) {
+                    Serial.printf("[DBC] Active file %s not found — removed from selection\n", fname.c_str());
+                }
             }
         }
         if (comma < 0) break;
         pos = comma + 1;
     }
+
+    if (pruned && spiffs_mounted) {
+        strncpy(g_cfg.active_dbcs, kept.c_str(), sizeof(g_cfg.active_dbcs) - 1);
+        g_cfg.active_dbcs[sizeof(g_cfg.active_dbcs) - 1] = '\0';
+        save_can_config(g_cfg);
+    }
+
+    dbc_parser.load_files(paths);
+}
+
+void CANWebServer::scan_dbc_file_info() {
+    dbc_file_info.clear();
+    File root = SPIFFS.open("/");
+    if (!root || !root.isDirectory()) return;
+    File f = root.openNextFile();
+    while (f) {
+        String name = String(f.name());
+        f.close();
+        if (name.startsWith("/")) name = name.substring(1);
+        if (name.endsWith(".dbc")) {
+            set_dbc_file_info(name, DBCSignalCounter::count_file(("/" + name).c_str()));
+        }
+        f = root.openNextFile();
+    }
+}
+
+void CANWebServer::set_dbc_file_info(const String& name, int32_t sigs) {
+    for (auto& e : dbc_file_info) {
+        if (e.name == name) { e.sigs = sigs; return; }
+    }
+    dbc_file_info.push_back({name, sigs});
+}
+
+int32_t CANWebServer::get_dbc_file_info(const String& name) const {
+    for (const auto& e : dbc_file_info) {
+        if (e.name == name) return e.sigs;
+    }
+    return -1;
 }
 
 /* Escape a String for safe JSON string value inclusion. */
@@ -4160,24 +4234,19 @@ static String json_escape(const String& in) {
     return out;
 }
 
+/* File list + signal budget for the /dbc page.
+   Per file: sigs = signals the file defines (-1 unknown); for active files also
+   loaded = signals actually stored (less than sigs when the budget ran out).
+   busy = a reload is pending or running; the page polls again shortly. */
 String CANWebServer::get_dbc_file_list_json() {
-    if (reload_dbc_pending) {
-        reload_dbc_pending = false;
-        reload_dbc_parser();
-    }
-
-    if (!spiffs_mounted) {
-        return "{\"files\":[],\"active_dbcs\":\"\",\"total_messages\":0,\"total_signals\":0,\"sig_cap\":" +
-               String(DBC_MAX_SIGNALS) +
-               ",\"sig_pct\":0,\"capped\":false,\"max_active\":4,\"heap_free\":" +
-               String((unsigned)ESP.getFreeHeap()) +
-               ",\"spiffs_total\":0,\"spiffs_used\":0}";
-    }
+    DBCSummary s = dbc_parser.summary();
+    bool busy = s.busy || reload_dbc_pending;
+    const char* limit = s.limit == DBC_LIMIT_CAP ? "cap" : s.limit == DBC_LIMIT_HEAP ? "heap" : "";
 
     String json = "{\"files\":[";
     bool first = true;
 
-    File root = SPIFFS.open("/");
+    File root = spiffs_mounted ? SPIFFS.open("/") : File();
     if (root && root.isDirectory()) {
         File f = root.openNextFile();
         while (f) {
@@ -4189,24 +4258,31 @@ String CANWebServer::get_dbc_file_list_json() {
                 bool active = is_in_dbc_list(g_cfg.active_dbcs, name.c_str());
                 json += "{\"name\":\"" + json_escape(name) + "\""
                         ",\"size\":"   + String(f.size()) +
-                        ",\"active\":" + (active ? "true" : "false") + "}";
+                        ",\"active\":" + (active ? "true" : "false") +
+                        ",\"sigs\":"   + String(get_dbc_file_info(name));
+                if (active && !busy) {
+                    for (const auto& fs : s.files) {
+                        if (name == fs.name) {
+                            json += ",\"loaded\":" + String(fs.loaded);
+                            break;
+                        }
+                    }
+                }
+                json += "}";
             }
             f = root.openNextFile();
         }
     }
 
-    json += "],\"active_dbcs\":\"";
-    json += json_escape(g_cfg.active_dbcs[0] ? g_cfg.active_dbcs : "");
-    json += "\""
-            ",\"total_messages\":" + String((unsigned)dbc_parser.message_count()) +
-            ",\"total_signals\":"  + String((unsigned)dbc_parser.signal_count())  +
-            ",\"sig_cap\":"        + String(DBC_MAX_SIGNALS)                       +
-            ",\"sig_pct\":"        + String(dbc_parser.signal_count() * 100 / (DBC_MAX_SIGNALS > 0 ? DBC_MAX_SIGNALS : 1)) +
-            ",\"capped\":"         + String(dbc_parser.signal_count() >= DBC_MAX_SIGNALS ? "true" : "false") +
-            ",\"max_active\":4"    +
-            ",\"heap_free\":"      + String((unsigned)ESP.getFreeHeap())            +
-            ",\"spiffs_total\":"   + String((unsigned)SPIFFS.totalBytes())         +
-            ",\"spiffs_used\":"    + String((unsigned)SPIFFS.usedBytes())          + "}";
+    json += "],\"busy\":"          + String(busy ? "true" : "false") +
+            ",\"total_messages\":" + String(s.messages) +
+            ",\"total_signals\":"  + String(s.signals)  +
+            ",\"dropped\":"        + String(s.dropped)  +
+            ",\"sig_cap\":"        + String(DBC_MAX_SIGNALS) +
+            ",\"limit\":\""        + limit + "\"" +
+            ",\"heap_free\":"      + String((unsigned)ESP.getFreeHeap()) +
+            ",\"spiffs_total\":"   + String(spiffs_mounted ? (unsigned)SPIFFS.totalBytes() : 0u) +
+            ",\"spiffs_used\":"    + String(spiffs_mounted ? (unsigned)SPIFFS.usedBytes()  : 0u) + "}";
     return json;
 }
 
@@ -4240,7 +4316,8 @@ String CANWebServer::generateDBCPage() {
   </div>
   <div class="header-right">
     <button type="button" class="btn small secondary" id="theme-btn" onclick="toggleTheme()">&#9728; Theme</button>
-    <a href="/" class="btn small secondary" style="text-decoration:none">&#8592; Back</a>
+    <a href="/config" class="btn small secondary" style="text-decoration:none">&#8592; Config</a>
+    <a href="/" class="btn small secondary" style="text-decoration:none">Analyser</a>
   </div>
 </div>
 
@@ -4268,12 +4345,10 @@ String CANWebServer::generateDBCPage() {
     <p style="color:var(--text,#ecf0f1);font-size:.85rem;margin:.25rem 0 .75rem">
     Tick a file to include it in the active signal database.
     Multiple files can be active simultaneously &mdash; signals are merged by CAN ID.
-    Max 4 files active at once. The selection survives a reboot.
+    The limit is the total number of signals (they are held in RAM), not the number of files.
+    The selection survives a reboot.
   </p>
-  <div id="cap-warning" style="display:none;background:#7d3c00;border:1px solid #e67e22;border-radius:5px;padding:.5rem .75rem;margin-bottom:.75rem;font-size:.85rem;color:#f5cba7">
-    &#9888; Signal cap reached (≈768) — some signals from large files were not loaded.
-    Deselect a file to free capacity.
-  </div>
+  <div id="cap-warning" style="display:none;background:#7d3c00;border:1px solid #e67e22;border-radius:5px;padding:.5rem .75rem;margin-bottom:.75rem;font-size:.85rem;color:#f5cba7"></div>
   <div id="file-list-container">Loading...</div>
 
 </div>
@@ -4294,22 +4369,36 @@ function parseJsonResponse(url, response) {
     });
 }
 
+function fmtN(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
 function updateHeader(data) {
   _lastData = data;
   var el = document.getElementById('active-summary');
-  if (!data.active_dbcs || data.active_dbcs === '') {
+  var names = data.files.filter(function(f){ return f.active; })
+                        .map(function(f){ return f.name; });
+  if (names.length === 0) {
     el.textContent = 'No DBC active';
+  } else if (data.busy) {
+    el.textContent = names.join(', ') + ' \u2014 loading\u2026';
   } else {
-    var sig = data.total_signals || 0;
-    var cap = data.sig_cap || 768;
+    var sig = data.total_signals, cap = data.sig_cap;
     var pctSig = Math.round(sig * 100 / cap);
-    var capColor = pctSig >= 100 ? '#e74c3c' : pctSig >= 75 ? '#e67e22' : '#2ecc71';
-    el.innerHTML = data.active_dbcs +
+    var capColor = data.limit ? '#e74c3c' : pctSig >= 75 ? '#e67e22' : '#2ecc71';
+    el.innerHTML = names.join(', ') +
       ' &mdash; <span style="color:' + capColor + '">' +
-      sig + '\u202F/\u202F' + cap + ' signals (' + pctSig + '%)</span>';
+      fmtN(sig) + '\u202F/\u202F' + fmtN(cap) + ' signals (' + pctSig + '%)</span>';
   }
   var warn = document.getElementById('cap-warning');
-  if (warn) warn.style.display = data.capped ? 'block' : 'none';
+  if (warn) {
+    if (!data.busy && data.dropped > 0) {
+      warn.innerHTML = '&#9888; ' + fmtN(data.dropped) + ' signals from the active files were not loaded \u2014 ' +
+        (data.limit === 'heap' ? 'free memory ran low.' : 'the ' + fmtN(data.sig_cap) + '-signal budget is full.') +
+        ' Decoding for those messages is unavailable. Deselect a file to free capacity.';
+      warn.style.display = 'block';
+    } else {
+      warn.style.display = 'none';
+    }
+  }
 }
 
 function loadFileList() {
@@ -4331,10 +4420,10 @@ function loadFileList() {
         }
         if (!data || typeof data !== 'object') data = {};
         if (!Array.isArray(data.files)) data.files = [];
-        if (typeof data.active_dbcs !== 'string') data.active_dbcs = '';
-        if (typeof data.max_active !== 'number') data.max_active = 4;
-        if (typeof data.sig_cap !== 'number') data.sig_cap = 768;
+        if (typeof data.sig_cap !== 'number' || data.sig_cap <= 0) data.sig_cap = 1;
         if (typeof data.total_signals !== 'number') data.total_signals = 0;
+        if (typeof data.dropped !== 'number') data.dropped = 0;
+        if (typeof data.limit !== 'string') data.limit = '';
         if (typeof data.spiffs_total !== 'number') data.spiffs_total = 0;
         if (typeof data.spiffs_used !== 'number') data.spiffs_used = 0;
         if (typeof data.heap_free !== 'number') data.heap_free = 0;
@@ -4349,29 +4438,32 @@ function loadFileList() {
       ' &nbsp;&bull;&nbsp; <span style="color:' + heapColor + '">Heap free: ' + heapKB + '\u202FKB</span>' +
       '</p>';
 
-    var activeCount = (data.active_dbcs && data.active_dbcs !== '')
-      ? (data.active_dbcs.split(',').length) : 0;
-    var atFileCap = activeCount >= (data.max_active || 4);
-    var atSigCap  = data.capped;
+    var budgetFull = !data.busy && data.limit !== '';
+    var free = Math.max(0, data.sig_cap - data.total_signals);
 
     if (!data.files || data.files.length === 0) {
     html += '<p style="color:var(--text,#ecf0f1)">No DBC files installed. Upload one above or add to <code>data/</code> and run <code>uploadfs</code>.</p>';
     } else {
       html += '<table class="dbc-table"><thead><tr>' +
-              '<th>Active</th><th>File</th><th>Size</th><th></th>' +
+              '<th>Active</th><th>File</th><th>Size</th><th>Signals</th><th></th>' +
               '</tr></thead><tbody>';
       data.files.forEach(function(f) {
         var id = 'chk-' + f.name.replace(/\./g,'_');
         var sizeKB = Math.round(f.size / 1024);
-        var sizeBadge = sizeKB > 200
-          ? ' <span title="Large file \u2014 may use significant signal budget" style="color:#e67e22;cursor:help">&#9888;</span>'
-          : '';
-        var wouldEnable = !f.active;
-        var disableChk = wouldEnable && (atFileCap || atSigCap);
-        var disableTitle = disableChk
-          ? (atFileCap ? 'Max 4 files active \u2014 deselect one first'
-                       : 'Signal cap reached \u2014 deselect a file to free capacity')
-          : '';
+        var sigCell;
+        if (typeof f.sigs !== 'number' || f.sigs < 0) {
+          sigCell = '?';
+        } else if (f.active && typeof f.loaded === 'number' && f.loaded < f.sigs) {
+          sigCell = '<span style="color:#e67e22" title="Only ' + fmtN(f.loaded) + ' of ' + fmtN(f.sigs) +
+                    ' signals fit in the budget">&#9888; ' + fmtN(f.loaded) + '\u202f/\u202f' + fmtN(f.sigs) + '</span>';
+        } else if (!f.active && !data.busy && f.sigs > free) {
+          sigCell = '<span style="color:#e67e22" title="Only about ' + fmtN(free) +
+                    ' more signals fit \u2014 the rest of this file would not be loaded">&#9888; ' + fmtN(f.sigs) + '</span>';
+        } else {
+          sigCell = fmtN(f.sigs);
+        }
+        var disableChk = !f.active && budgetFull;
+        var disableTitle = disableChk ? 'Signal budget full \u2014 deselect a file to free capacity' : '';
         html += '<tr>' +
           '<td style="text-align:center">' +
             '<input type="checkbox" id="' + id + '"' + (f.active?' checked':'') +
@@ -4379,7 +4471,8 @@ function loadFileList() {
             ' onchange="toggleDBC(\'' + f.name + '\',this.checked)">' +
           '</td>' +
           '<td><label for="' + id + '" class="dbc-label">' + f.name + '</label></td>' +
-          '<td style="white-space:nowrap">' + sizeKB + '\u202FKB' + sizeBadge + '</td>' +
+          '<td style="white-space:nowrap">' + sizeKB + '\u202FKB</td>' +
+          '<td style="white-space:nowrap">' + sigCell + '</td>' +
           '<td><button class="btn small" style="background:#c0392b;border-color:#c0392b" ' +
                'onclick="deleteDBC(\'' + f.name + '\')"' +
                (f.active ? ' title="Deselect before deleting"' : '') +
@@ -4387,12 +4480,10 @@ function loadFileList() {
           '</tr>';
       });
       html += '</tbody></table>';
-      if (atFileCap) {
-        html += '<p style="color:#e67e22;font-size:.82rem;margin:.5rem 0">&#9888; ' +
-          activeCount + ' of ' + (data.max_active||4) + ' max files active.</p>';
-      }
     }
         document.getElementById('file-list-container').innerHTML = html;
+        /* A reload is running on the device \u2014 check back for the final counts. */
+        if (data.busy) setTimeout(loadFileList, 800);
     }).catch(function(err) {
     document.getElementById('file-list-container').innerHTML =
             '<p class="err">Failed to load file list: ' + ((err && err.message) ? err.message : 'unknown error') + '</p>';
@@ -4408,7 +4499,12 @@ function toggleDBC(fname, enable) {
     if (status) status.innerHTML = '<span class="info">Applying selection...</span>';
 
   fetch('/api/dbc/select', {method:'POST', body:fd})
-        .then(function(r) { return parseJsonResponse('/api/dbc/select', r); })
+        /* Error replies (409 etc.) carry {error:...}; read them rather than throwing. */
+        .then(function(r) {
+            return r.text().then(function(t) {
+                try { return JSON.parse(t); } catch (e) { throw new Error('HTTP ' + r.status); }
+            });
+        })
     .then(function(data) {
       if (data.ok) {
                 if (status) status.innerHTML = '<span class="ok">Selection updated.</span>';
@@ -4436,10 +4532,8 @@ document.getElementById('dbc-file').addEventListener('change', function() {
   if (this.files.length) {
     var f = this.files[0];
     var sz = Math.round(f.size/1024);
-    var warn = f.size > 150*1024
-      ? ' <span style="color:#e67e22">&#9888; Large file \u2014 may approach signal cap</span>' : '';
     document.getElementById('upload-status').innerHTML =
-      '<span class="info">Selected: ' + f.name + ' (' + sz + ' KB)</span>' + warn;
+      '<span class="info">Selected: ' + f.name + ' (' + sz + ' KB)</span>';
   }
 });
 

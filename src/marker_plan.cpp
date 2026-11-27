@@ -3,16 +3,9 @@
 */
 
 #include "marker_plan.h"
+#include "can_config.h"   /* print_can_mesg(), g_serial_mode */
 #include <Preferences.h>
 #include <SPIFFS.h>
-
-/* print_can_mesg is defined in main.cpp — emits one CAN frame to the active
-   serial log stream (mode 1 = SavvyCAN CSV, mode 2 = binary GVRET). */
-extern void print_can_mesg(unsigned short bus, long unsigned int id,
-                            unsigned short len, uint8_t *buf);
-
-extern volatile bool    g_serial_logging;
-extern volatile uint8_t g_serial_mode;
 
 /* ---------------------------------------------------------------------------
    Global instance
@@ -27,7 +20,9 @@ MarkerPlan::MarkerPlan() {}
 
 void MarkerPlan::begin() {
     Preferences prefs;
-    prefs.begin(MARKER_NVS_NS, /* readOnly= */ true);
+    /* Read-write so a never-saved namespace is created rather than logging
+       "nvs_open failed: NOT_FOUND" on every boot. Only reads happen here. */
+    prefs.begin(MARKER_NVS_NS, /* readOnly= */ false);
     _step = prefs.getUChar("step", 0);
     _run  = prefs.getUChar("run",  0);
     prefs.end();

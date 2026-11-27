@@ -4,6 +4,76 @@ All notable changes to CAN Bridge Analyzer are documented here.
 
 ---
 
+## [Unreleased]
+
+### Serial logging
+- Removed the per-bus "Print frames to serial" tick boxes. They were saved but
+  never used; both buses are always logged
+- Removed the per-bus Enable settings: both controllers always run (CAN1 used
+  to default to off). An unwired bus simply receives nothing
+- TX Scheduler frames are now logged, marked `Tx` in the CSV `Dir` column
+- Binary GVRET: logging starts by itself when SavvyCAN connects
+- Frame writes from different tasks no longer interleave mid-line
+- Removed the unused `/api/serial_log_format` endpoint
+
+### Web UI
+- Status badge on each bus panel: Live / No traffic / No ACK / RX errors /
+  Bus off / No controller, with error counters on hover (`/api/bus_status`)
+- Dashboard header slimmed down: Theme, DBC and OTA moved to the Config page;
+  Config sits at the far right
+- Config page simplified: Serial logging, Bus speed, WiFi, then DBC files
+  (shows active files) and Firmware cards; shorter text, one save confirmation
+- CAN1 panel labelled `CAN0←CAN1` so both panels list the buses in the same
+  order
+- Config and licences pages lay out correctly at phone width. The analyser
+  console itself needs a laptop or PC
+
+### DBC files
+- No limit on the number of active files. The only limit is the total signal
+  count held in RAM, raised from 768 to 2,000. Loading also stops early if free
+  heap would drop below 64 KB
+- **Signals** column on the DBC page: how many signals each file defines and,
+  when a file only partly fits, how many were loaded (e.g. ⚠ 1,200 / 2,900).
+  A banner says how many signals were dropped and why. Replaces the warnings
+  based on file size
+- Active files that no longer exist (e.g. after `uploadfs` or a filesystem OTA)
+  are removed from the saved selection. Before, they kept counting as active, so
+  the page could show "4 of 4 files" with one file installed
+- The signal database (`/api/dbc/signals`) is streamed in chunks instead of
+  built as one large string, so large DBC files no longer need ~100 KB of
+  contiguous heap
+- DBC loading runs only in the main loop, and the signal data is guarded by a
+  lock. Before, the file list and signals requests could reload it while the
+  message detail view was decoding from it
+- DBC files load faster (buffered reads), and re-uploading an active file
+  reloads it
+- Selection errors (e.g. signal budget full) are shown on the page instead of
+  "request interrupted"
+
+### Fixes
+- **DBC upload no longer reboots the unit.** The upload handler stored its
+  result as a number cast to a pointer in `request->_tempObject`, which the web
+  server later passes to `free()` — an assert and restart, dropping the WiFi AP
+- No more `nvs_open failed: NOT_FOUND` on every boot: the TX scheduler and
+  marker plan settings are created on first boot instead of only when first
+  saved, and default config is saved on a fresh unit
+- CustomOTA updated to 1.6.2: fixes `nvs_get_blob len fail: backup_ver
+  NOT_FOUND` on every boot, and the backup's firmware version is shown again
+  instead of "Previous Firmware (auto-detected)"
+
+### WiFi
+- Default device name is now `canbridge` (`http://canbridge.local`) instead of
+  `canbridge-xxxxxx` from the MAC address. Units sharing a network still need
+  their own names. Units that already saved a name keep it
+
+### Documentation
+- Printable in-box card (`manual/in-box-card.html`): WiFi details, wiring
+  diagram, getting started, factory reset and open source notice
+- Manual states that a laptop or PC is required, and explains how to find the
+  unit at `http://<device name>.local` when it joins your WiFi
+
+---
+
 ## [0.4.0] — 2026-11-27
 
 > **Flash over USB once:** the partition table has changed. Do a full

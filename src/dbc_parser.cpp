@@ -7,25 +7,39 @@
 #include <math.h>
 
 DBCParser::DBCParser() {
-    active_dbc_path[0] = '\0';
+    mtx = xSemaphoreCreateMutex();
 }
 
-void DBCParser::clear() {
-    signals.clear();
-    active_dbc_path[0] = '\0';
-}
+// ---------------------------------------------------------------------------
+// Signal line counter (used for files that aren't loaded)
+// ---------------------------------------------------------------------------
 
-size_t DBCParser::signal_count() const {
-    size_t count = 0;
-    for (const auto& pair : signals) {
-        count += pair.second.size();
+void DBCSignalCounter::feed(const uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        char c = (char)data[i];
+        if (c == '\n') { state = 0; continue; }
+        switch (state) {
+            case 0: state = (c == ' ' || c == '\t') ? 1 : 4; break;
+            case 1: state = (c == ' ' || c == '\t') ? 1 : (c == 'S' ? 2 : 4); break;
+            case 2: state = (c == 'G') ? 3 : 4; break;
+            case 3: if (c == '_') count++; state = 4; break;
+            default: break;
+        }
     }
-    return count;
 }
 
-bool DBCParser::has_signals_for(uint32_t can_id) const {
-    auto it = signals.find(can_id);
-    return it != signals.end() && !it->second.empty();
+int32_t DBCSignalCounter::count_file(const char* path) {
+    File f = SPIFFS.open(path, "r");
+    if (!f) return -1;
+    DBCSignalCounter c;
+    uint8_t buf[512];
+    size_t n;
+    while ((n = f.read(buf, sizeof(buf))) > 0) {
+        c.feed(buf, n);
+        yield();
+    }
+    f.close();
+    return (int32_t)c.count;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,26 +92,35 @@ int64_t DBCParser::extract_raw(const uint8_t* data, uint8_t start_bit,
 // Line parser
 // ---------------------------------------------------------------------------
 
-void DBCParser::parse_line(const String& line, uint32_t& current_id) {
+bool DBCParser::can_store() {
+    if (limit != DBC_LIMIT_NONE) return false;   /* sticky once hit */
+    if (sig_total >= DBC_MAX_SIGNALS)            { limit = DBC_LIMIT_CAP;  return false; }
+    if (ESP.getFreeHeap() < DBC_MIN_FREE_HEAP)   { limit = DBC_LIMIT_HEAP; return false; }
+    return true;
+}
+
+DBCParser::LineResult DBCParser::parse_line(const String& line, uint32_t& current_id) {
     /* BO_ <id> <name>: <dlc> <sender> */
     if (line.startsWith("BO_ ")) {
         unsigned long id = 0;
         char name[64] = "";
-        // sscanf format: skip "BO_ ", then parse unsigned id and name-up-to-colon
         if (sscanf(line.c_str(), "BO_ %lu %63[^:]:", &id, name) >= 1) {
             current_id = (uint32_t)id;
-            /* Touch the map so the message is visible even if it has no signals. */
-            signals[current_id];
+            /* Touch the map so the message is visible even if it has no signals —
+               but not once we've stopped storing, so dropped messages cost no RAM. */
+            if (can_store()) signals[current_id];
         }
-        return;
+        return LINE_OTHER;
     }
 
     /* SG_ lines must follow a BO_ context.
        Normal:      SG_ <name> : <start>|<len>@<bo><sign> (<f>,<o>) [<min>|<max>] "<unit>"
-       Multiplexed: SG_ <name> m<n> : ...   (skip — not yet supported)
-       Multiplexer: SG_ <name> M : ...      (skip) */
-    if (!(line.startsWith(" SG_") || line.startsWith("\tSG_"))) return;
-    if (current_id == UINT32_MAX) return;
+       Multiplexed: SG_ <name> m<n> : ...   (parsed as a plain signal) */
+    if (!(line.startsWith(" SG_") || line.startsWith("\tSG_"))) return LINE_OTHER;
+    if (current_id == UINT32_MAX) return LINE_OTHER;
+
+    /* Past the cap: just count it, skip the parse work. */
+    if (!can_store()) return LINE_DROPPED;
 
     char   sig_name[DBC_NAME_LEN] = "";
     int    start_bit = 0, length = 0, byte_order = 1;
@@ -117,12 +140,10 @@ void DBCParser::parse_line(const String& line, uint32_t& current_id) {
         n = sscanf(line.c_str(), " SG_ %31s %15s : %d|%d@%d%c (%f,%f)",
                    sig_name, mux, &start_bit, &length, &byte_order, &sign_char,
                    &factor, &offset);
-        if (n < 8) return; /* Cannot parse — skip. */
+        if (n < 8) return LINE_OTHER; /* Cannot parse — skip. */
     }
 
-    /* Reject any signal name that looks like a mux indicator (pure digits or
-       leading 'm'/'M') that slipped through. */
-    if (sig_name[0] == '\0') return;
+    if (sig_name[0] == '\0') return LINE_OTHER;
 
     /* Extract quoted unit string. */
     const char* q1 = strchr(line.c_str(), '"');
@@ -137,8 +158,8 @@ void DBCParser::parse_line(const String& line, uint32_t& current_id) {
     }
 
     /* Clamp length to valid range. */
-    if (length <= 0 || length > 64) return;
-    if (start_bit < 0 || start_bit > 63) return;
+    if (length <= 0 || length > 64) return LINE_OTHER;
+    if (start_bit < 0 || start_bit > 63) return LINE_OTHER;
 
     DBCSignal sig;
     strncpy(sig.name, sig_name, DBC_NAME_LEN - 1);
@@ -165,25 +186,38 @@ void DBCParser::parse_line(const String& line, uint32_t& current_id) {
         }
     }
 
-    /* Guard: don't push if at cap (belt-and-suspenders; load_file also checks). */
-    if (signal_count() < DBC_MAX_SIGNALS) {
-        signals[current_id].push_back(sig);
-    }
+    signals[current_id].push_back(sig);
+    sig_total++;
+    return LINE_STORED;
 }
 
 // ---------------------------------------------------------------------------
 // File loading
 // ---------------------------------------------------------------------------
 
-bool DBCParser::load_from_spiffs(const char* path) {
+void DBCParser::clear_locked() {
     signals.clear();
-    active_dbc_path[0] = '\0';
-    return load_file(path);
+    file_stats.clear();
+    sig_total = 0;
+    dropped   = 0;
+    limit     = DBC_LIMIT_NONE;
+    generation++;
 }
 
-bool DBCParser::load_additive_from_spiffs(const char* path) {
-    /* Don't clear — merge into existing signal map. */
-    return load_file(path);
+void DBCParser::clear() {
+    xSemaphoreTake(mtx, portMAX_DELAY);
+    clear_locked();
+    xSemaphoreGive(mtx);
+}
+
+void DBCParser::load_files(const std::vector<String>& paths) {
+    xSemaphoreTake(mtx, portMAX_DELAY);
+    clear_locked();
+    for (const String& p : paths) {
+        load_file(p.c_str());
+    }
+    generation++;
+    xSemaphoreGive(mtx);
 }
 
 bool DBCParser::load_file(const char* path) {
@@ -199,64 +233,79 @@ bool DBCParser::load_file(const char* path) {
         Serial.printf("[DBC] Loading %s (heap free: %u B)\n", path, (unsigned)ESP.getFreeHeap());
     }
 
+    DBCFileStat st;
+    const char* nm = (path[0] == '/') ? path + 1 : path;
+    strncpy(st.name, nm, DBC_PATH_LEN - 1);
+    st.name[DBC_PATH_LEN - 1] = '\0';
+    uint32_t defined = 0, loaded = 0;
+
     uint32_t current_id = UINT32_MAX;
     int line_count = 0;
-    bool capped = false;
+    bool ok = true;
     String line;
     line.reserve(256);
+    uint8_t buf[512];
+
+    auto handle = [&](void) {
+        if (line.length() > 0 && line[line.length() - 1] == '\r') {
+            line.remove(line.length() - 1);
+        }
+        if (line.length() > 0) {
+            LineResult r = parse_line(line, current_id);
+            if (r == LINE_STORED)  { defined++; loaded++; }
+            if (r == LINE_DROPPED) { defined++; dropped++; }
+            if (++line_count % 200 == 0) yield();   /* keep the WDT fed */
+        }
+        line = "";
+    };
 
     try {
-        while (f.available()) {
-            /* Bail early if we've hit the global signal cap. */
-            if (signal_count() >= DBC_MAX_SIGNALS) {
-                if (g_serial_logging && g_serial_mode == 0) {
-                    Serial.printf("[DBC] Signal cap (%u) reached — stopping parse of %s\n",
-                                  DBC_MAX_SIGNALS, path);
-                }
-                capped = true;
-                break;
-            }
-            char c = (char)f.read();
-            if (c == '\n') {
-                /* Strip trailing carriage return if present (Windows line endings). */
-                if (line.length() > 0 && line[line.length() - 1] == '\r') {
-                    line.remove(line.length() - 1);
-                }
-                if (line.length() > 0) {
-                    parse_line(line, current_id);
-                    line_count++;
-                    /* Yield every 200 lines to prevent WDT reset on large files. */
-                    if (line_count % 200 == 0) yield();
-                }
-                line = "";
-            } else {
-                /* Discard lines that grow unreasonably long (corrupt/binary file). */
-                if (line.length() < 512) line += c;
+        size_t n;
+        while ((n = f.read(buf, sizeof(buf))) > 0) {
+            for (size_t i = 0; i < n; i++) {
+                char c = (char)buf[i];
+                if (c == '\n') handle();
+                else if (line.length() < 512) line += c;  /* drop runaway lines */
             }
         }
-        /* Handle file without trailing newline. */
-        if (!capped && line.length() > 0) {
-            parse_line(line, current_id);
-        }
+        handle();  /* file without trailing newline */
     } catch (const std::bad_alloc&) {
+        limit = DBC_LIMIT_HEAP;
+        ok = false;
         if (g_serial_logging && g_serial_mode == 0) {
             Serial.printf("[DBC] OOM while parsing %s — signals loaded so far: %u (heap: %u B)\n",
-                          path, (unsigned)signal_count(), (unsigned)ESP.getFreeHeap());
+                          path, (unsigned)sig_total, (unsigned)ESP.getFreeHeap());
         }
-        f.close();
-        return false;
     }
-
     f.close();
 
-    strncpy(active_dbc_path, path, DBC_PATH_LEN - 1);
-    active_dbc_path[DBC_PATH_LEN - 1] = '\0';
+    st.defined = (uint16_t)(defined > 0xFFFF ? 0xFFFF : defined);
+    st.loaded  = (uint16_t)(loaded  > 0xFFFF ? 0xFFFF : loaded);
+    file_stats.push_back(st);
 
     if (g_serial_logging && g_serial_mode == 0) {
-        Serial.printf("[DBC] Loaded %s — %u messages, %u signals\n",
-                      path, (unsigned)message_count(), (unsigned)signal_count());
+        Serial.printf("[DBC] Loaded %s — %u of %u signals (total %u, heap free %u B)\n",
+                      path, (unsigned)loaded, (unsigned)defined,
+                      (unsigned)sig_total, (unsigned)ESP.getFreeHeap());
     }
-    return true;
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Status snapshot
+// ---------------------------------------------------------------------------
+
+DBCSummary DBCParser::summary() {
+    DBCSummary s;
+    s.busy = false; s.messages = 0; s.signals = 0; s.dropped = 0; s.limit = DBC_LIMIT_NONE;
+    if (xSemaphoreTake(mtx, 0) != pdTRUE) { s.busy = true; return s; }
+    s.messages = signals.size();
+    s.signals  = sig_total;
+    s.dropped  = dropped;
+    s.limit    = limit;
+    s.files    = file_stats;
+    xSemaphoreGive(mtx);
+    return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,11 +313,12 @@ bool DBCParser::load_file(const char* path) {
 // ---------------------------------------------------------------------------
 
 int DBCParser::decode(uint32_t can_id, const uint8_t* data, uint8_t len,
-                      String& json_out) const {
+                      String& json_out) {
     json_out = "[]";
+    if (xSemaphoreTake(mtx, pdMS_TO_TICKS(20)) != pdTRUE) return 0;  /* loading */
 
     auto it = signals.find(can_id);
-    if (it == signals.end() || it->second.empty()) return 0;
+    if (it == signals.end() || it->second.empty()) { xSemaphoreGive(mtx); return 0; }
 
     /* Pad to 8 bytes so bit extraction never reads past the buffer. */
     uint8_t buf[8] = {0};
@@ -314,64 +364,102 @@ int DBCParser::decode(uint32_t can_id, const uint8_t* data, uint8_t len,
     }
 
     json_out += "]";
-    return (int)it->second.size();
+    int count = (int)it->second.size();
+    xSemaphoreGive(mtx);
+    return count;
 }
 
 // ---------------------------------------------------------------------------
-// Full signal map → JSON (for /api/dbc/signals browser cache endpoint)
+// Full signal map → JSON, streamed (for /api/dbc/signals browser cache endpoint)
 // ---------------------------------------------------------------------------
 
-String DBCParser::to_json() const {
-    String json;
-    json.reserve(8192);
-    json = "{";
-    bool first_msg = true;
+void DBCParser::fill_pending(DBCJsonCursor& cur) {
+    cur.pend_len = cur.pend_off = 0;
+    const size_t cap = sizeof(cur.pend);
 
-    for (const auto& kv : signals) {
-        const std::vector<DBCSignal>& sigs = kv.second;
-        if (sigs.empty()) continue; /* Skip messages with no parsed signals. */
-
-        if (!first_msg) json += ",";
-        first_msg = false;
-
-        char id_str[16];
-        snprintf(id_str, sizeof(id_str), "\"0x%lx\":", (unsigned long)kv.first);
-        json += id_str;
-        json += "[";
-
-        bool first_sig = true;
-        for (const auto& sig : sigs) {
-            if (!first_sig) json += ",";
-            first_sig = false;
-
-            /* Escape backslash and double-quote characters in unit string. */
-            char esc_unit[DBC_UNIT_LEN * 2 + 1];
-            size_t j = 0;
-            for (size_t i = 0; sig.unit[i] && j < sizeof(esc_unit) - 2; i++) {
-                if (sig.unit[i] == '"' || sig.unit[i] == '\\') esc_unit[j++] = '\\';
-                esc_unit[j++] = sig.unit[i];
-            }
-            esc_unit[j] = '\0';
-
-            char buf[256];
-            snprintf(buf, sizeof(buf),
-                     "{\"n\":\"%s\",\"sb\":%u,\"bl\":%u,\"le\":%s,"
-                     "\"si\":%s,\"sc\":%.8g,\"of\":%.8g,\"u\":\"%s\","
-                     "\"mn\":%.8g,\"mx\":%.8g}",
-                     sig.name,
-                     (unsigned)sig.start_bit,
-                     (unsigned)sig.length,
-                     sig.little_endian ? "true" : "false",
-                     sig.is_signed    ? "true" : "false",
-                     (double)sig.factor,
-                     (double)sig.offset,
-                     esc_unit,
-                     (double)sig.min_val,
-                     (double)sig.max_val);
-            json += buf;
-        }
-        json += "]";
+    if (cur.phase == 0) {
+        cur.pend[0] = '{'; cur.pend_len = 1; cur.phase = 1;
+        return;
     }
-    json += "}";
-    return json;
+
+    /* Find the message to emit; skip messages with no stored signals. */
+    auto it = signals.lower_bound(cur.next_id);
+    while (it != signals.end() && it->second.empty()) ++it;
+    if (it == signals.end()) {
+        cur.pend[0] = '}'; cur.pend_len = 1; cur.phase = 2;
+        return;
+    }
+    if (it->first != cur.next_id) { cur.next_id = it->first; cur.sig_idx = 0; }
+
+    const std::vector<DBCSignal>& sigs = it->second;
+    int n;
+    if (cur.sig_idx == 0) {
+        n = snprintf(cur.pend, cap, "%s\"0x%lx\":[",
+                     cur.first_msg ? "" : ",", (unsigned long)it->first);
+        cur.first_msg = false;
+    } else {
+        n = snprintf(cur.pend, cap, ",");
+    }
+
+    const DBCSignal& sig = sigs[cur.sig_idx];
+
+    /* Escape backslash and double-quote characters in unit string. */
+    char esc_unit[DBC_UNIT_LEN * 2 + 1];
+    size_t j = 0;
+    for (size_t i = 0; sig.unit[i] && j < sizeof(esc_unit) - 2; i++) {
+        if (sig.unit[i] == '"' || sig.unit[i] == '\\') esc_unit[j++] = '\\';
+        esc_unit[j++] = sig.unit[i];
+    }
+    esc_unit[j] = '\0';
+
+    n += snprintf(cur.pend + n, cap - n,
+                  "{\"n\":\"%s\",\"sb\":%u,\"bl\":%u,\"le\":%s,"
+                  "\"si\":%s,\"sc\":%.8g,\"of\":%.8g,\"u\":\"%s\","
+                  "\"mn\":%.8g,\"mx\":%.8g}",
+                  sig.name,
+                  (unsigned)sig.start_bit,
+                  (unsigned)sig.length,
+                  sig.little_endian ? "true" : "false",
+                  sig.is_signed    ? "true" : "false",
+                  (double)sig.factor,
+                  (double)sig.offset,
+                  esc_unit,
+                  (double)sig.min_val,
+                  (double)sig.max_val);
+
+    if (++cur.sig_idx >= sigs.size()) {
+        n += snprintf(cur.pend + n, cap - n, "]");
+        cur.next_id = it->first + 1;
+        cur.sig_idx = 0;
+    }
+    cur.pend_len = (n < (int)cap) ? (size_t)n : cap - 1;
+}
+
+size_t DBCParser::json_chunk(DBCJsonCursor& cur, uint8_t* buf, size_t max_len, size_t try_again) {
+    /* Never block the AsyncTCP task: if a load holds the lock, ask to be called again. */
+    if (xSemaphoreTake(mtx, 0) != pdTRUE) return try_again;
+
+    if (cur.phase == 0) {
+        cur.gen = generation;
+    } else if (cur.gen != generation) {
+        /* Database was reloaded mid-stream — end it; the client refetches. */
+        xSemaphoreGive(mtx);
+        return 0;
+    }
+
+    size_t out = 0;
+    while (out < max_len) {
+        if (cur.pend_off < cur.pend_len) {
+            size_t n = cur.pend_len - cur.pend_off;
+            if (n > max_len - out) n = max_len - out;
+            memcpy(buf + out, cur.pend + cur.pend_off, n);
+            cur.pend_off += n;
+            out += n;
+            continue;
+        }
+        if (cur.phase == 2) break;
+        fill_pending(cur);
+    }
+    xSemaphoreGive(mtx);
+    return out;
 }
