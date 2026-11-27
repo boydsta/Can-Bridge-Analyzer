@@ -4,7 +4,10 @@ All notable changes to CAN Bridge Analyzer are documented here.
 
 ---
 
-## [Unreleased]
+## [0.5.0] — 2026-11-28
+
+> **Updates over the air from 0.4.0** (`/update`, `firmware.bin`): the partition
+> table is unchanged. Saved settings are kept.
 
 ### Serial logging
 - Removed the per-bus "Print frames to serial" tick boxes. They were saved but
